@@ -58,8 +58,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Build and push (latest + sha)
         uses: docker/build-push-action@v6
@@ -90,10 +90,19 @@ jobs:
             IMAGE=ghcr.io/${{ github.repository_owner }}/fastroute-api:${{ github.sha }}
             LATEST=ghcr.io/${{ github.repository_owner }}/fastroute-api:latest
 
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
             docker pull "$IMAGE"
             docker tag "$IMAGE" "$LATEST"
-            docker compose up -d
 
+            # Libera a porta 3000 caso exista container antigo preso nela
+            PORT_3000_CONTAINERS=$(docker ps --filter "publish=3000" --format '{{.ID}}')
+            if [ -n "$PORT_3000_CONTAINERS" ]; then
+              docker ps --filter "publish=3000" --format 'Removing :3000 -> {{.ID}} {{.Names}} {{.Image}}'
+              docker rm -f $PORT_3000_CONTAINERS
+            fi
+
+            docker compose up -d --pull never --force-recreate --remove-orphans
+
+            docker logout ghcr.io || true
             docker image prune -f
