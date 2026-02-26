@@ -17,9 +17,12 @@ router.get('/route', requireAuth, async (req, res, next) => {
 
 router.post('/route/import', requireAuth, upload.single('file'), async (req, res, next) => {
   try {
+    const epsParam = typeof req.query.eps === 'string' ? req.query.eps : req.body?.eps;
+    const minPtsParam = typeof req.query.minPts === 'string' ? req.query.minPts : req.body?.minPts;
+
     const result = await routeService.importRoute(req.auth.userId, req.file, {
-      eps: req.body?.eps,
-      minPts: req.body?.minPts
+      eps: epsParam,
+      minPts: minPtsParam
     });
     res.json(result);
   } catch (error) {
