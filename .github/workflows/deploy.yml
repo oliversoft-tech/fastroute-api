@@ -58,7 +58,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: oliverbill
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (latest + sha)
@@ -67,8 +67,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/oliverbill/fastroute-api:latest
-            ghcr.io/oliverbill/fastroute-api:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/fastroute-api:latest
+            ghcr.io/${{ github.repository_owner }}/fastroute-api:${{ github.sha }}
 
   deploy:
     name: Deploy to VPS
@@ -84,12 +84,16 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            set -e
+            set -euo pipefail
             cd /opt/fastroute
 
-            docker login ghcr.io -u oliverbill -p ${{ secrets.GHCR_PAT }}
+            IMAGE=ghcr.io/${{ github.repository_owner }}/fastroute-api:${{ github.sha }}
+            LATEST=ghcr.io/${{ github.repository_owner }}/fastroute-api:latest
 
-            docker compose pull api
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+            docker pull "$IMAGE"
+            docker tag "$IMAGE" "$LATEST"
             docker compose up -d
 
             docker image prune -f
