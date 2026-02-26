@@ -25,7 +25,7 @@ npm run build
 Configure os secrets abaixo no repositório:
 
 - `GHCR_USERNAME`: usuário dono do pacote no GHCR (ex.: `oliverbill`)
-- `GHCR_PAT`: token com escopos `read:packages`, `write:packages` e `repo` (se repo privado)
+- `GHCR_PAT`: token para o VPS fazer pull do GHCR (`read:packages` e `repo` se repo privado)
 - `VPS_HOST`
 - `VPS_USER`
 - `VPS_SSH_KEY`
