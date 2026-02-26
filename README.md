@@ -5,7 +5,7 @@ API gerada a partir da collection Postman `FastRouteApp.postman_collection.json`
 
 ## Setup
 
-```bash
+```bash 
 npm install
 cp .env.example .env
 npm run dev
@@ -19,6 +19,16 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+## Deploy Secrets (GitHub Actions)
+
+Configure os secrets abaixo no repositório:
+
+- `GHCR_USERNAME`: usuário dono do pacote no GHCR (ex.: `oliverbill`)
+- `GHCR_PAT`: token com escopos `read:packages`, `write:packages` e `repo` (se repo privado)
+- `VPS_HOST`
+- `VPS_USER`
+- `VPS_SSH_KEY`
 
 ## Endpoints (collection)
 
