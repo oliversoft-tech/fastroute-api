@@ -1,5 +1,6 @@
 'use strict';
 function errorHandler(err, req, res, next) {
+  void next;
   console.error(err);
   const status = Number(err.status) || 500;
 

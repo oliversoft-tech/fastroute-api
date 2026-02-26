@@ -412,7 +412,7 @@ function parseImportRows(file) {
     let parsed;
     try {
       parsed = JSON.parse(raw);
-    } catch (error) {
+    } catch {
       throw new AppError(400, 'Arquivo JSON inválido.');
     }
     if (Array.isArray(parsed)) {

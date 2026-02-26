@@ -11,6 +11,15 @@ cp .env.example .env
 npm run dev
 ```
 
+## CI Scripts
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
 ## Endpoints (collection)
 
 - `POST /login`
