@@ -27,72 +27,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push multi-arch image
+      - name: Build and push image
         run: |
-          IMAGE_SHA=ghcr.io/oliverbill/fastroute-api:${{ github.sha }}
-          IMAGE_LATEST=ghcr.io/oliverbill/fastroute-api:latest
-
           docker buildx build \
             --platform linux/amd64 \
-            -t $IMAGE_SHA \
-            -t $IMAGE_LATEST \
+            -t ghcr.io/oliverbill/fastroute-api:latest \
             --push .
 
-      - name: Deploy with automatic rollback
+      - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            set -e
             cd /home/deploy/fastroute
 
-            NEW_TAG=${{ github.sha }}
+            echo "${{ secrets.GHCR_READ_TOKEN }}" | docker login ghcr.io -u oliverbill --password-stdin
 
-            echo "🔎 Detectando versão atual..."
-            CURRENT_IMAGE=$(docker inspect fastroute-api --format='{{.Config.Image}}' 2>/dev/null || echo "")
-            
-            if [ -z "$CURRENT_IMAGE" ]; then
-              echo "⚠️ Nenhum container existente encontrado. Primeiro deploy."
-              CURRENT_TAG=""
-            else
-              CURRENT_TAG=$(echo $CURRENT_IMAGE | cut -d ':' -f2)
-              echo "Versão atual: $CURRENT_TAG"
-            fi
-
-            echo "Nova versão: $NEW_TAG"
-
-            echo "⬇️ Pull da nova imagem..."
-            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u oliverbill --password-stdin
-            docker pull ghcr.io/oliverbill/fastroute-api:$NEW_TAG
-
-            echo "🚀 Subindo nova versão..."
-            IMAGE_TAG=$NEW_TAG
+            docker pull ghcr.io/oliverbill/fastroute-api:latest
             docker compose up -d
-
-            echo "⏳ Aguardando container ficar healthy..."
-            for i in {1..20}; do
-              STATUS=$(docker inspect --format='{{.State.Health.Status}}' fastroute-api 2>/dev/null || echo "starting")
-              echo "Health status: $STATUS"
-
-              if [ "$STATUS" = "healthy" ]; then
-                echo "✅ Deploy realizado com sucesso"
-                exit 0
-              fi
-
-              sleep 5
-            done
-
-            echo "❌ Health falhou."
-
-            if [ -n "$CURRENT_TAG" ]; then
-              echo "🔁 Iniciando rollback para $CURRENT_TAG"
-              export IMAGE_TAG=$CURRENT_TAG
-              docker compose up -d
-              echo "Rollback executado."
-            else
-              echo "⚠️ Não havia versão anterior para rollback."
-            fi
-
-            exit 1
