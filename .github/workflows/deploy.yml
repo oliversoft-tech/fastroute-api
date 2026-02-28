@@ -64,6 +64,7 @@ jobs:
             echo "Nova versão: $NEW_TAG"
 
             echo "⬇️ Pull da nova imagem..."
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u oliverbill --password-stdin
             docker pull ghcr.io/oliverbill/fastroute-api:$NEW_TAG
 
             echo "🚀 Subindo nova versão..."
