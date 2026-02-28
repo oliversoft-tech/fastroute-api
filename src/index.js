@@ -28,7 +28,8 @@ app.use('/sync', syncRoutes);
 
 app.use(errorHandler);
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`FastRoute backend running on http://localhost:${port}`);
+const PORT = process.env.PORT || 3002;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`astRoute backend running on ${PORT}`);
 });
