@@ -42,18 +42,23 @@ async function applyMutation(m) {
       .eq('id', m.entityId)
       .single();
 
-    if (!route) return { mutationId: m.mutationId, status: 'NOT_FOUND' };
+    if (!route) {
+      await supabaseAdmin.from('routes')
+        .insert({ id: m.entityId, ...m.payload, version: 1 });
 
-    if (route.version !== m.baseVersion)
-      return { mutationId: m.mutationId, status: 'CONFLICT', serverVersion: route.version };
+      await logChange('route', m.entityId, m.op, 1, m.payload);
+    } else {
+      if (route.version !== m.baseVersion)
+        return { mutationId: m.mutationId, status: 'CONFLICT', serverVersion: route.version };
 
-    const nextVersion = route.version + 1;
+      const nextVersion = route.version + 1;
 
-    await supabaseAdmin.from('routes')
-      .update({ ...m.payload, version: nextVersion })
-      .eq('id', m.entityId);
+      await supabaseAdmin.from('routes')
+        .update({ ...m.payload, version: nextVersion })
+        .eq('id', m.entityId);
 
-    await logChange('route', route.id, m.op, nextVersion, m.payload);
+      await logChange('route', route.id, m.op, nextVersion, m.payload);
+    }
   }
 
   if (m.entityType === 'route_waypoint') {
