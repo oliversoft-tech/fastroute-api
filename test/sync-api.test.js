@@ -193,6 +193,15 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
         },
         {
           deviceId: 'device-1',
+          mutationId: 'm-import-waypoint',
+          entityType: 'route_waypoint',
+          entityId: 9910,
+          op: 'CREATE',
+          baseVersion: 0,
+          payload: { route_id: 910, seq_order: 1, status: 'PENDENTE' }
+        },
+        {
+          deviceId: 'device-1',
           mutationId: 'm-start-route',
           entityType: 'route',
           entityId: 101,
@@ -254,7 +263,7 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
     assert.equal(pushResponse.payload.results.length, mutationBatch.mutations.length);
     assert.deepEqual(
       pushResponse.payload.results.map((r) => r.status),
-      ['APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED']
+      ['APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED']
     );
 
     const duplicateResponse = await postJson(baseUrl, '/sync/push', {
@@ -302,7 +311,7 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
 
     assert.equal(pullResponse.status, 200);
     assert.equal(pullResponse.payload.ok, true);
-    assert.equal(pullResponse.payload.changes.length, 7);
+    assert.equal(pullResponse.payload.changes.length, 8);
 
     const pullOps = pullResponse.payload.changes.map((change) => change.op);
     assert.ok(pullOps.includes('CREATE'));
@@ -313,6 +322,12 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
     assert.ok(persistedRoute910);
     assert.equal(persistedRoute910.status, 'CRIADA');
     assert.equal(persistedRoute910.version, 1);
+
+    const persistedWaypoint9910 = fakeSupabase.state.route_waypoints.find((waypoint) => waypoint.id === 9910);
+    assert.ok(persistedWaypoint9910);
+    assert.equal(persistedWaypoint9910.route_id, 910);
+    assert.equal(persistedWaypoint9910.status, 'PENDENTE');
+    assert.equal(persistedWaypoint9910.version, 1);
 
     const route101 = fakeSupabase.state.routes.find((route) => route.id === 101);
     assert.ok(route101);

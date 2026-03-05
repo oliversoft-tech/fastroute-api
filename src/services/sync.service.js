@@ -69,7 +69,21 @@ async function applyMutation(m) {
       .eq('id', m.entityId)
       .single();
 
-    if (!wp) return { mutationId: m.mutationId, status: 'NOT_FOUND' };
+    if (!wp) {
+      const op = String(m.op || '').toUpperCase();
+      if (op !== 'CREATE') {
+        return { mutationId: m.mutationId, status: 'NOT_FOUND' };
+      }
+
+      await supabaseAdmin
+        .from('route_waypoints')
+        .insert({ id: m.entityId, ...m.payload, version: 1 });
+
+      await logChange('route_waypoint', m.entityId, m.op, 1, m.payload);
+
+      await markApplied(m.deviceId, m.mutationId);
+      return { mutationId: m.mutationId, status: 'APPLIED' };
+    }
 
     if (wp.version !== m.baseVersion)
       return { mutationId: m.mutationId, status: 'CONFLICT', serverVersion: wp.version };
