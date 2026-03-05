@@ -13,7 +13,8 @@
     "dev": "nodemon src/index.js",
     "dev:hot": "nodemon --watch src --watch .env --ext js,json,env --exec \"npm run build && node src/index.js\"",
     "dev:hot-deploy": "nodemon --watch . --ext js,json,env --exec \"npm run bootstrap:local && npm run build && node src/index.js\"",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "governance:impact": "node scripts/governance/analyze-impact.js"
   },
   "dependencies": {
     "@oliverbill/fastroute-domain": "^0.2.0",
