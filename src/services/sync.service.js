@@ -74,6 +74,23 @@ function compactObject(payload) {
   return out;
 }
 
+const ROUTE_TRANSIENT_FIELDS = new Set([
+  'waypoint_count',
+  'waypointCount',
+  'waypoints_count',
+  'waypointsCount',
+  'waypoints',
+  'stops'
+]);
+
+function sanitizeRoutePayload(rawPayload) {
+  const payload = toNormalizedObject(rawPayload);
+  for (const field of ROUTE_TRANSIENT_FIELDS) {
+    delete payload[field];
+  }
+  return payload;
+}
+
 async function resolveDriverIdFromAuthUserId(authUserId) {
   const normalizedAuthUserId = String(authUserId || '').trim();
   if (!normalizedAuthUserId) {
@@ -96,7 +113,7 @@ async function resolveDriverIdFromAuthUserId(authUserId) {
 }
 
 async function enrichRoutePayload(rawPayload) {
-  const payload = toNormalizedObject(rawPayload);
+  const payload = sanitizeRoutePayload(rawPayload);
   const rawDriverId = payload.driver_id ?? payload.user_id;
   const parsedDriverId = toPositiveInt(rawDriverId);
 
