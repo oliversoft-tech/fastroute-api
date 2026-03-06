@@ -190,6 +190,8 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
           op: 'CREATE',
           baseVersion: 0,
           payload: {
+            import_id: 700,
+            auth_user_id: '77',
             status: 'CRIADA',
             ativa: false,
             waypoint_count: 2,
@@ -327,6 +329,9 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
     const persistedRoute910 = fakeSupabase.state.routes.find((route) => route.id === 910);
     assert.ok(persistedRoute910);
     assert.equal(persistedRoute910.status, 'CRIADA');
+    assert.equal(persistedRoute910.import_id, 700);
+    assert.equal(persistedRoute910.driver_id, 77);
+    assert.equal(persistedRoute910.user_id, 77);
     assert.equal(persistedRoute910.version, 1);
     assert.equal(persistedRoute910.waypoint_count, undefined);
     assert.equal(persistedRoute910.waypoints_count, undefined);
