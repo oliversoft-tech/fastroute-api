@@ -116,12 +116,17 @@ async function enrichRoutePayload(rawPayload) {
   const payload = sanitizeRoutePayload(rawPayload);
   const rawDriverId = payload.driver_id ?? payload.user_id;
   const parsedDriverId = toPositiveInt(rawDriverId);
+  const authUserId = String(payload.auth_user_id ?? '').trim();
+  const parsedDriverIdFromAuthUserId = toPositiveInt(authUserId);
 
   if (parsedDriverId) {
     payload.driver_id = parsedDriverId;
     payload.user_id = parsedDriverId;
+  } else if (parsedDriverIdFromAuthUserId) {
+    // Backward compatibility: some clients persisted driver id in auth_user_id.
+    payload.driver_id = parsedDriverIdFromAuthUserId;
+    payload.user_id = parsedDriverIdFromAuthUserId;
   } else {
-    const authUserId = String(payload.auth_user_id ?? '').trim();
     const resolvedDriverId = await resolveDriverIdFromAuthUserId(authUserId);
     if (resolvedDriverId) {
       payload.driver_id = resolvedDriverId;
@@ -131,6 +136,74 @@ async function enrichRoutePayload(rawPayload) {
 
   delete payload.auth_user_id;
   return compactObject(payload);
+}
+
+function buildRouteCreatePayload(routePayload, mutation) {
+  const payload = compactObject(toNormalizedObject(routePayload));
+
+  if (!toPositiveInt(payload.import_id)) {
+    const fallbackImportId =
+      toPositiveInt(mutation?.payload?.import_id) ??
+      toPositiveInt(mutation?.payload?.importId) ??
+      toPositiveInt(payload.id) ??
+      toPositiveInt(mutation?.entityId);
+    if (fallbackImportId) {
+      payload.import_id = fallbackImportId;
+    }
+  }
+
+  if (!toPositiveInt(payload.driver_id)) {
+    const fallbackDriverId =
+      toPositiveInt(payload.user_id) ??
+      toPositiveInt(mutation?.payload?.driver_id) ??
+      toPositiveInt(mutation?.payload?.driverId) ??
+      toPositiveInt(mutation?.payload?.user_id) ??
+      toPositiveInt(mutation?.payload?.userId) ??
+      toPositiveInt(mutation?.payload?.auth_user_id) ??
+      toPositiveInt(mutation?.payload?.authUserId);
+
+    if (fallbackDriverId) {
+      payload.driver_id = fallbackDriverId;
+      payload.user_id = fallbackDriverId;
+    }
+  }
+
+  if (!String(payload.status ?? '').trim()) {
+    payload.status = 'CRIADA';
+  }
+
+  const parsedClusterId = Math.trunc(Number(payload.cluster_id));
+  payload.cluster_id = Number.isFinite(parsedClusterId) ? parsedClusterId : 0;
+
+  if (payload.ativa === undefined || payload.ativa === null) {
+    payload.ativa = false;
+  }
+
+  if (!payload.created_at) {
+    payload.created_at = new Date().toISOString();
+  }
+
+  const missingColumns = [];
+  if (!toPositiveInt(payload.import_id)) {
+    missingColumns.push('import_id');
+  }
+  if (!toPositiveInt(payload.driver_id)) {
+    missingColumns.push('driver_id');
+  }
+
+  if (missingColumns.length > 0) {
+    throw new AppError(
+      400,
+      `Payload de rota incompleto para sync CREATE: colunas obrigatórias ausentes (${missingColumns.join(', ')}).`,
+      {
+        mutationId: mutation?.mutationId ?? null,
+        entityId: mutation?.entityId ?? null,
+        payloadKeys: Object.keys(payload).sort()
+      }
+    );
+  }
+
+  return payload;
 }
 
 async function wasApplied(deviceId, mutationId) {
@@ -188,25 +261,16 @@ async function applyMutation(m) {
     }
 
     if (!route) {
-      if (!toPositiveInt(routePayload.import_id)) {
-        const fallbackImportId =
-          toPositiveInt(m?.payload?.import_id) ??
-          toPositiveInt(m?.payload?.importId) ??
-          toPositiveInt(routePayload.id) ??
-          toPositiveInt(m.entityId);
-        if (fallbackImportId) {
-          routePayload = { ...routePayload, import_id: fallbackImportId };
-        }
-      }
+      const routeCreatePayload = buildRouteCreatePayload(routePayload, m);
 
       try {
-        const inserted = await insertWithVersion('routes', { id: m.entityId, ...routePayload });
+        const inserted = await insertWithVersion('routes', { id: m.entityId, ...routeCreatePayload });
         void inserted;
       } catch (insertError) {
         throw new AppError(500, `Erro ao criar rota via sync: ${insertError.message}`);
       }
 
-      await logChange('route', m.entityId, m.op, 1, routePayload);
+      await logChange('route', m.entityId, m.op, 1, routeCreatePayload);
     } else {
       const currentVersion = readVersion(route);
       if (currentVersion !== m.baseVersion)
