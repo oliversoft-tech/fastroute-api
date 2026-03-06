@@ -176,7 +176,7 @@ async function applyMutation(m) {
   }
 
   if (m.entityType === 'route') {
-    const routePayload = await enrichRoutePayload(m.payload);
+    let routePayload = await enrichRoutePayload(m.payload);
     const { data: route, error: routeError } = await supabaseAdmin
       .from('routes')
       .select('*')
@@ -188,6 +188,17 @@ async function applyMutation(m) {
     }
 
     if (!route) {
+      if (!toPositiveInt(routePayload.import_id)) {
+        const fallbackImportId =
+          toPositiveInt(m?.payload?.import_id) ??
+          toPositiveInt(m?.payload?.importId) ??
+          toPositiveInt(routePayload.id) ??
+          toPositiveInt(m.entityId);
+        if (fallbackImportId) {
+          routePayload = { ...routePayload, import_id: fallbackImportId };
+        }
+      }
+
       try {
         const inserted = await insertWithVersion('routes', { id: m.entityId, ...routePayload });
         void inserted;
