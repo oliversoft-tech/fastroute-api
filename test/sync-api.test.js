@@ -189,7 +189,13 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
           entityId: 910,
           op: 'CREATE',
           baseVersion: 0,
-          payload: { status: 'CRIADA', ativa: false, waypoints_count: 2 }
+          payload: {
+            status: 'CRIADA',
+            ativa: false,
+            waypoint_count: 2,
+            waypoints_count: 2,
+            waypointsCount: 2
+          }
         },
         {
           deviceId: 'device-1',
@@ -322,6 +328,9 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
     assert.ok(persistedRoute910);
     assert.equal(persistedRoute910.status, 'CRIADA');
     assert.equal(persistedRoute910.version, 1);
+    assert.equal(persistedRoute910.waypoint_count, undefined);
+    assert.equal(persistedRoute910.waypoints_count, undefined);
+    assert.equal(persistedRoute910.waypointsCount, undefined);
 
     const persistedWaypoint9910 = fakeSupabase.state.route_waypoints.find((waypoint) => waypoint.id === 9910);
     assert.ok(persistedWaypoint9910);
