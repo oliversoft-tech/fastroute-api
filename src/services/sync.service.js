@@ -135,6 +135,7 @@ async function enrichRoutePayload(rawPayload) {
   }
 
   delete payload.auth_user_id;
+  delete payload.user_id;
   return compactObject(payload);
 }
 
@@ -164,7 +165,6 @@ function buildRouteCreatePayload(routePayload, mutation) {
 
     if (fallbackDriverId) {
       payload.driver_id = fallbackDriverId;
-      payload.user_id = fallbackDriverId;
     }
   }
 
@@ -172,8 +172,13 @@ function buildRouteCreatePayload(routePayload, mutation) {
     payload.status = 'CRIADA';
   }
 
-  const parsedClusterId = Math.trunc(Number(payload.cluster_id));
-  payload.cluster_id = Number.isFinite(parsedClusterId) ? parsedClusterId : 0;
+  if (!toPositiveInt(payload.cluster_id)) {
+    const fallbackClusterId =
+      toPositiveInt(mutation?.payload?.cluster_id) ??
+      toPositiveInt(mutation?.payload?.clusterId) ??
+      1;
+    payload.cluster_id = fallbackClusterId;
+  }
 
   if (payload.ativa === undefined || payload.ativa === null) {
     payload.ativa = false;
@@ -190,6 +195,9 @@ function buildRouteCreatePayload(routePayload, mutation) {
   if (!toPositiveInt(payload.driver_id)) {
     missingColumns.push('driver_id');
   }
+  if (!toPositiveInt(payload.cluster_id)) {
+    missingColumns.push('cluster_id');
+  }
 
   if (missingColumns.length > 0) {
     throw new AppError(
@@ -203,6 +211,7 @@ function buildRouteCreatePayload(routePayload, mutation) {
     );
   }
 
+  delete payload.user_id;
   return payload;
 }
 

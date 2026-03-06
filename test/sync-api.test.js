@@ -331,7 +331,8 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
     assert.equal(persistedRoute910.status, 'CRIADA');
     assert.equal(persistedRoute910.import_id, 700);
     assert.equal(persistedRoute910.driver_id, 77);
-    assert.equal(persistedRoute910.user_id, 77);
+    assert.equal(persistedRoute910.cluster_id, 1);
+    assert.equal(persistedRoute910.user_id, undefined);
     assert.equal(persistedRoute910.version, 1);
     assert.equal(persistedRoute910.waypoint_count, undefined);
     assert.equal(persistedRoute910.waypoints_count, undefined);
