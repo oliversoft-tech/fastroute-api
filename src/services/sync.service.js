@@ -30,6 +30,11 @@ function isMissingColumnError(error, columnName) {
   return message.includes('column') && message.includes(columnName.toLowerCase()) && message.includes('does not exist');
 }
 
+function isMissingTableError(error, tableName) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('could not find the table') && message.includes(`'public.${String(tableName || '').toLowerCase()}'`);
+}
+
 function readVersion(row) {
   return toNonNegativeInt(row?.version ?? row?.versao ?? 0) ?? 0;
 }
@@ -82,6 +87,109 @@ const ROUTE_TRANSIENT_FIELDS = new Set([
   'waypoints',
   'stops'
 ]);
+
+const importIdMappingByDeviceAndDriver = new Map();
+
+function buildImportMappingKey(deviceId, driverId, rawImportId) {
+  const normalizedDeviceId = String(deviceId || 'unknown-device').trim() || 'unknown-device';
+  const normalizedDriverId = String(toPositiveInt(driverId) || 'unknown-driver');
+  const normalizedImportId = String(toPositiveInt(rawImportId) || 'missing-import-id');
+  return `${normalizedDeviceId}:${normalizedDriverId}:${normalizedImportId}`;
+}
+
+async function findExistingImportId(importId) {
+  const parsedImportId = toPositiveInt(importId);
+  if (!parsedImportId) {
+    return null;
+  }
+
+  for (const tableName of ['orders_import', 'imports']) {
+    const { data, error } = await supabaseAdmin
+      .from(tableName)
+      .select('id')
+      .eq('id', parsedImportId)
+      .maybeSingle();
+
+    if (!error && toPositiveInt(data?.id)) {
+      return toPositiveInt(data.id);
+    }
+
+    if (error && !isMissingTableError(error, tableName)) {
+      throw error;
+    }
+  }
+
+  return null;
+}
+
+async function createImportIdForDriver(driverId) {
+  const parsedDriverId = toPositiveInt(driverId);
+  if (!parsedDriverId) {
+    return null;
+  }
+
+  const attempts = [
+    { table: 'orders_import', payload: { user_id: parsedDriverId } },
+    { table: 'imports', payload: { user_id: parsedDriverId, file_name: 'sync-import' } },
+    { table: 'imports', payload: { user_id: parsedDriverId, filename: 'sync-import' } }
+  ];
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    const { data, error } = await supabaseAdmin.from(attempt.table).insert(attempt.payload).select('id').single();
+    if (!error && toPositiveInt(data?.id)) {
+      return toPositiveInt(data.id);
+    }
+    if (error && !isMissingTableError(error, attempt.table)) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return null;
+}
+
+async function ensureRouteImportId(routePayload, mutation) {
+  const payload = toNormalizedObject(routePayload);
+  const driverId =
+    toPositiveInt(payload.driver_id) ??
+    toPositiveInt(mutation?.payload?.driver_id) ??
+    toPositiveInt(mutation?.payload?.driverId) ??
+    toPositiveInt(mutation?.payload?.user_id) ??
+    toPositiveInt(mutation?.payload?.userId);
+
+  if (!driverId) {
+    return null;
+  }
+
+  const requestedImportId =
+    toPositiveInt(payload.import_id) ??
+    toPositiveInt(mutation?.payload?.import_id) ??
+    toPositiveInt(mutation?.payload?.importId);
+
+  const mappingKey = buildImportMappingKey(mutation?.deviceId, driverId, requestedImportId);
+  const mappedImportId = toPositiveInt(importIdMappingByDeviceAndDriver.get(mappingKey));
+  if (mappedImportId) {
+    return mappedImportId;
+  }
+
+  const existingImportId = await findExistingImportId(requestedImportId);
+  if (existingImportId) {
+    importIdMappingByDeviceAndDriver.set(mappingKey, existingImportId);
+    return existingImportId;
+  }
+
+  const createdImportId = await createImportIdForDriver(driverId);
+  if (!createdImportId) {
+    return null;
+  }
+
+  importIdMappingByDeviceAndDriver.set(mappingKey, createdImportId);
+  return createdImportId;
+}
 
 function sanitizeRoutePayload(rawPayload) {
   const payload = toNormalizedObject(rawPayload);
@@ -271,6 +379,10 @@ async function applyMutation(m) {
 
     if (!route) {
       const routeCreatePayload = buildRouteCreatePayload(routePayload, m);
+      const ensuredImportId = await ensureRouteImportId(routeCreatePayload, m);
+      if (ensuredImportId) {
+        routeCreatePayload.import_id = ensuredImportId;
+      }
 
       try {
         const inserted = await insertWithVersion('routes', { id: m.entityId, ...routeCreatePayload });
