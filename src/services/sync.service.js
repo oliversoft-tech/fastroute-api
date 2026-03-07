@@ -467,6 +467,7 @@ async function applyMutation(m) {
 
   if (m.entityType === 'route') {
     let routePayload = await enrichRoutePayload(m.payload);
+    const routeOperation = String(m.op || '').toUpperCase();
     const { data: route, error: routeError } = await supabaseAdmin
       .from('routes')
       .select('*')
@@ -493,21 +494,28 @@ async function applyMutation(m) {
 
       await logChange('route', m.entityId, m.op, 1, routeCreatePayload);
     } else {
+      if (routeOperation === 'CREATE') {
+        await markApplied(m.deviceId, m.mutationId);
+        return { mutationId: m.mutationId, status: 'APPLIED' };
+      }
+
       const currentVersion = readVersion(route);
       if (currentVersion !== m.baseVersion)
         return { mutationId: m.mutationId, status: 'CONFLICT', serverVersion: currentVersion };
 
       const nextVersion = currentVersion + 1;
       const versionField = pickVersionField(route);
+      const routeUpdatePayload = compactObject({ ...routePayload });
+      delete routeUpdatePayload.import_id;
 
       const { error: updateError } = await supabaseAdmin.from('routes')
-        .update({ ...routePayload, [versionField]: nextVersion })
+        .update({ ...routeUpdatePayload, [versionField]: nextVersion })
         .eq('id', m.entityId);
       if (updateError) {
         throw new AppError(500, `Erro ao atualizar rota via sync: ${updateError.message}`);
       }
 
-      await logChange('route', route.id, m.op, nextVersion, routePayload);
+      await logChange('route', route.id, m.op, nextVersion, routeUpdatePayload);
     }
   }
 
