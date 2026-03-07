@@ -30,9 +30,27 @@ function isMissingColumnError(error, columnName) {
   return message.includes('column') && message.includes(columnName.toLowerCase()) && message.includes('does not exist');
 }
 
+function readMissingColumnName(error) {
+  const message = String(error?.message || '');
+  const schemaCacheMatch = message.match(/Could not find the '([^']+)' column/i);
+  if (schemaCacheMatch && schemaCacheMatch[1]) {
+    return schemaCacheMatch[1];
+  }
+  const postgresMatch = message.match(/column "([^"]+)" does not exist/i);
+  if (postgresMatch && postgresMatch[1]) {
+    return postgresMatch[1];
+  }
+  return null;
+}
+
 function isMissingTableError(error, tableName) {
   const message = String(error?.message || '').toLowerCase();
   return message.includes('could not find the table') && message.includes(`'public.${String(tableName || '').toLowerCase()}'`);
+}
+
+function isRlsPolicyError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('row-level security policy');
 }
 
 function readVersion(row) {
@@ -199,6 +217,79 @@ function sanitizeRoutePayload(rawPayload) {
   return payload;
 }
 
+const WAYPOINT_TRANSIENT_FIELDS = new Set([
+  'detailed_address',
+  'lat',
+  'long',
+  'latitude',
+  'longitude',
+  'title',
+  'subtitle'
+]);
+
+function sanitizeWaypointPayload(rawPayload) {
+  const payload = toNormalizedObject(rawPayload);
+  for (const field of WAYPOINT_TRANSIENT_FIELDS) {
+    delete payload[field];
+  }
+  return payload;
+}
+
+async function insertWaypointWithCompatiblePayload(entityId, rawPayload) {
+  const payload = compactObject(sanitizeWaypointPayload(rawPayload));
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await insertWithVersion('route_waypoints', { id: entityId, ...payload });
+      return payload;
+    } catch (error) {
+      const missingColumn = readMissingColumnName(error);
+      if (!missingColumn || !Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
+        throw error;
+      }
+      delete payload[missingColumn];
+      lastError = error;
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return payload;
+}
+
+async function updateWaypointWithCompatiblePayload(entityId, payload, versionField, nextVersion) {
+  const updatePayload = compactObject(sanitizeWaypointPayload(payload));
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const { error } = await supabaseAdmin
+      .from('route_waypoints')
+      .update({ ...updatePayload, [versionField]: nextVersion })
+      .eq('id', entityId);
+
+    if (!error) {
+      return updatePayload;
+    }
+
+    const missingColumn = readMissingColumnName(error);
+    if (!missingColumn || !Object.prototype.hasOwnProperty.call(updatePayload, missingColumn)) {
+      throw error;
+    }
+
+    delete updatePayload[missingColumn];
+    lastError = error;
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return updatePayload;
+}
+
 async function resolveDriverIdFromAuthUserId(authUserId) {
   const normalizedAuthUserId = String(authUserId || '').trim();
   if (!normalizedAuthUserId) {
@@ -331,6 +422,9 @@ async function wasApplied(deviceId, mutationId) {
     .eq('mutation_id', mutationId)
     .maybeSingle();
   if (error) {
+    if (isRlsPolicyError(error)) {
+      return false;
+    }
     throw new AppError(500, `Erro ao consultar mutações aplicadas: ${error.message}`);
   }
   return !!data;
@@ -342,6 +436,9 @@ async function markApplied(deviceId, mutationId) {
     mutation_id: mutationId
   });
   if (error) {
+    if (isRlsPolicyError(error)) {
+      return;
+    }
     throw new AppError(500, `Erro ao registrar mutação aplicada: ${error.message}`);
   }
 }
@@ -355,6 +452,9 @@ async function logChange(entityType, entityId, op, version, payload) {
     payload
   });
   if (error) {
+    if (isRlsPolicyError(error)) {
+      return;
+    }
     throw new AppError(500, `Erro ao registrar change_log: ${error.message}`);
   }
 }
@@ -412,6 +512,7 @@ async function applyMutation(m) {
   }
 
   if (m.entityType === 'route_waypoint') {
+    const waypointPayload = compactObject(sanitizeWaypointPayload(m.payload));
 
     const { data: wp, error: waypointError } = await supabaseAdmin
       .from('route_waypoints')
@@ -430,13 +531,12 @@ async function applyMutation(m) {
       }
 
       try {
-        const inserted = await insertWithVersion('route_waypoints', { id: m.entityId, ...m.payload });
-        void inserted;
+        await insertWaypointWithCompatiblePayload(m.entityId, waypointPayload);
       } catch (insertWaypointError) {
         throw new AppError(500, `Erro ao criar waypoint via sync: ${insertWaypointError.message}`);
       }
 
-      await logChange('route_waypoint', m.entityId, m.op, 1, m.payload);
+      await logChange('route_waypoint', m.entityId, m.op, 1, waypointPayload);
 
       await markApplied(m.deviceId, m.mutationId);
       return { mutationId: m.mutationId, status: 'APPLIED' };
@@ -449,14 +549,13 @@ async function applyMutation(m) {
     const nextVersion = currentVersion + 1;
     const versionField = pickVersionField(wp);
 
-    const { error: updateWaypointError } = await supabaseAdmin.from('route_waypoints')
-      .update({ ...m.payload, [versionField]: nextVersion })
-      .eq('id', m.entityId);
-    if (updateWaypointError) {
+    try {
+      await updateWaypointWithCompatiblePayload(m.entityId, waypointPayload, versionField, nextVersion);
+    } catch (updateWaypointError) {
       throw new AppError(500, `Erro ao atualizar waypoint via sync: ${updateWaypointError.message}`);
     }
 
-    await logChange('route_waypoint', wp.id, m.op, nextVersion, m.payload);
+    await logChange('route_waypoint', wp.id, m.op, nextVersion, waypointPayload);
   }
 
   await markApplied(m.deviceId, m.mutationId);
@@ -479,6 +578,9 @@ async function pull(sinceTs) {
     .order('created_at', { ascending: true });
 
   if (error) {
+    if (isRlsPolicyError(error)) {
+      return { ok: true, changes: [] };
+    }
     throw new AppError(500, `Erro ao consultar change_log: ${error.message}`);
   }
 
