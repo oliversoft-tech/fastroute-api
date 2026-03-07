@@ -1,0 +1,22 @@
+name: Governance CI After Approval
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch-governance-ci:
+    if: ${{ github.event.review.state == 'approved' && startsWith(github.event.pull_request.head.ref, 'codex/governance-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch governance-ci (approved)
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CROSS_REPO_PAT }}
+          repository: oliversoft-tech/fastroute-changemanagement
+          event-type: governance-ci
+          client-payload: >-
+            {"source_repo":"${{ github.event.repository.name }}","source_event":"pull_request_review","source_ref":"${{ github.event.pull_request.base.ref }}","source_sha":"${{ github.event.pull_request.head.sha }}","head_ref":"${{ github.event.pull_request.head.ref }}","head_sha":"${{ github.event.pull_request.head.sha }}","approved":true}

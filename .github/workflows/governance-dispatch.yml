@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   dispatch:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.event.pull_request.head.ref, 'codex/governance-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch governance run to central orchestrator
@@ -20,4 +21,4 @@ jobs:
           repository: oliversoft-tech/fastroute-changemanagement
           event-type: governance-ci
           client-payload: >-
-            {"source_repo":"fastroute-api","source_event":"${{ github.event_name }}","source_ref":"${{ github.ref_name }}","source_sha":"${{ github.sha }}","head_ref":"${{ github.event.pull_request.head.ref || github.ref_name }}","head_sha":"${{ github.event.pull_request.head.sha || github.sha }}"}
+            {"source_repo":"${{ github.event.repository.name }}","source_event":"${{ github.event_name }}","source_ref":"${{ github.ref_name }}","source_sha":"${{ github.sha }}","head_ref":"${{ github.event.pull_request.head.ref || github.ref_name }}","head_sha":"${{ github.event.pull_request.head.sha || github.sha }}"}
