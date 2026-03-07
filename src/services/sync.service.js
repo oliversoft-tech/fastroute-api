@@ -520,6 +520,7 @@ async function applyMutation(m) {
   }
 
   if (m.entityType === 'route_waypoint') {
+    const waypointOperation = String(m.op || '').toUpperCase();
     const waypointPayload = compactObject(sanitizeWaypointPayload(m.payload));
 
     const { data: wp, error: waypointError } = await supabaseAdmin
@@ -533,8 +534,7 @@ async function applyMutation(m) {
     }
 
     if (!wp) {
-      const op = String(m.op || '').toUpperCase();
-      if (op !== 'CREATE') {
+      if (waypointOperation !== 'CREATE') {
         return { mutationId: m.mutationId, status: 'NOT_FOUND' };
       }
 
@@ -546,6 +546,11 @@ async function applyMutation(m) {
 
       await logChange('route_waypoint', m.entityId, m.op, 1, waypointPayload);
 
+      await markApplied(m.deviceId, m.mutationId);
+      return { mutationId: m.mutationId, status: 'APPLIED' };
+    }
+
+    if (waypointOperation === 'CREATE') {
       await markApplied(m.deviceId, m.mutationId);
       return { mutationId: m.mutationId, status: 'APPLIED' };
     }

@@ -282,6 +282,22 @@ test('sync API: push/pull cobre todas as operações do app + cenários de dupli
     assert.equal(duplicateResponse.status, 200);
     assert.equal(duplicateResponse.payload.results[0].status, 'DUPLICATE');
 
+    const replayWaypointCreateResponse = await postJson(baseUrl, '/sync/push', {
+      mutations: [
+        {
+          deviceId: 'device-1',
+          mutationId: 'm-import-waypoint-retry',
+          entityType: 'route_waypoint',
+          entityId: 9910,
+          op: 'CREATE',
+          baseVersion: 0,
+          payload: { route_id: 910, seq_order: 1, status: 'PENDENTE' }
+        }
+      ]
+    });
+    assert.equal(replayWaypointCreateResponse.status, 200);
+    assert.equal(replayWaypointCreateResponse.payload.results[0].status, 'APPLIED');
+
     const conflictResponse = await postJson(baseUrl, '/sync/push', {
       mutations: [
         {
