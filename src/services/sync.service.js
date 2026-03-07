@@ -521,6 +521,7 @@ async function applyMutation(m) {
 
   if (m.entityType === 'route_waypoint') {
     const waypointOperation = String(m.op || '').toUpperCase();
+    const waypointChangePayload = compactObject(toNormalizedObject(m.payload));
     const waypointPayload = compactObject(sanitizeWaypointPayload(m.payload));
 
     const { data: wp, error: waypointError } = await supabaseAdmin
@@ -544,7 +545,7 @@ async function applyMutation(m) {
         throw new AppError(500, `Erro ao criar waypoint via sync: ${insertWaypointError.message}`);
       }
 
-      await logChange('route_waypoint', m.entityId, m.op, 1, waypointPayload);
+      await logChange('route_waypoint', m.entityId, m.op, 1, waypointChangePayload);
 
       await markApplied(m.deviceId, m.mutationId);
       return { mutationId: m.mutationId, status: 'APPLIED' };
@@ -568,7 +569,7 @@ async function applyMutation(m) {
       throw new AppError(500, `Erro ao atualizar waypoint via sync: ${updateWaypointError.message}`);
     }
 
-    await logChange('route_waypoint', wp.id, m.op, nextVersion, waypointPayload);
+    await logChange('route_waypoint', wp.id, m.op, nextVersion, waypointChangePayload);
   }
 
   await markApplied(m.deviceId, m.mutationId);
