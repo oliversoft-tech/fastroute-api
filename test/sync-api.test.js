@@ -8,6 +8,7 @@ function createFakeSupabase(initial = {}) {
   const state = {
     routes: [...(initial.routes || [])],
     route_waypoints: [...(initial.route_waypoints || [])],
+    orders_import: [...(initial.orders_import || [])],
     mutations_applied: [...(initial.mutations_applied || [])],
     change_log: [...(initial.change_log || [])]
   };
@@ -167,6 +168,7 @@ async function postJson(baseUrl, path, body) {
 
 test('sync API: push/pull cobre todas as operações do app + cenários de duplicate/conflict/not_found', async () => {
   const fakeSupabase = createFakeSupabase({
+    orders_import: [{ id: 700, user_id: 77, status: 'SEM_ROTA' }],
     routes: [
       { id: 101, status: 'CRIADA', version: 1, ativa: true },
       { id: 102, status: 'EM_ANDAMENTO', version: 2, ativa: true }
