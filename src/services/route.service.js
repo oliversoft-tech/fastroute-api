@@ -16,6 +16,11 @@ function isRelationMissing(error) {
   return message.includes('does not exist') || message.includes('could not find');
 }
 
+function isMissingTableError(error, tableName) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('could not find the table') && message.includes(`'public.${String(tableName || '').toLowerCase()}'`);
+}
+
 function toPositiveInt(value, fieldName) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -502,18 +507,27 @@ function extractAddressPoints(rows) {
 
 async function createImportRecord(driverId, originalName) {
   const candidates = [
-    { user_id: driverId, file_name: originalName },
-    { user_id: driverId, filename: originalName }
+    { table: 'orders_import', payload: { user_id: driverId } },
+    { table: 'imports', payload: { user_id: driverId, file_name: originalName } },
+    { table: 'imports', payload: { user_id: driverId, filename: originalName } }
   ];
 
-  for (const payload of candidates) {
-    const { data, error } = await supabaseAdmin.from('imports').insert(payload).select('id').single();
+  let lastError = null;
+  for (const candidate of candidates) {
+    const { data, error } = await supabaseAdmin.from(candidate.table).insert(candidate.payload).select('id').single();
     if (!error && data?.id) {
       return data.id;
     }
+    if (error && !isMissingTableError(error, candidate.table)) {
+      lastError = error;
+    }
   }
 
-  return Date.now();
+  if (lastError) {
+    throw new AppError(500, `Erro ao criar importação: ${lastError.message}`);
+  }
+
+  throw new AppError(500, 'Erro ao criar importação: tabela de importação indisponível.');
 }
 
 async function importRoute(authUserId, file, options = {}) {
