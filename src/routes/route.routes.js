@@ -8,7 +8,7 @@ const { upload } = require('../middleware/upload.middleware');
 router.get('/route', requireAuth, async (req, res, next) => {
   try {
     const routeId = req.query.route_id || req.query['route-id'];
-    const result = await routeService.getRoute(req.auth.userId, routeId);
+    const result = await routeService.getRoute(req.auth.userId, routeId, req.auth.accessToken);
     res.json(result);
   } catch (error) {
     next(error);

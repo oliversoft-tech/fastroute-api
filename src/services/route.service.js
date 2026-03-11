@@ -1,5 +1,6 @@
 'use strict';
 
+const { createClient } = require('@supabase/supabase-js');
 const { z } = require('zod');
 const {
   canFinishRoute,
@@ -45,6 +46,14 @@ function pickNonEmptyString(...values) {
 function toNullableNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toOptionalPositiveInt(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.trunc(parsed);
 }
 
 function readDetailedAddress(row = {}) {
@@ -104,7 +113,49 @@ function readLongitude(row = {}) {
   );
 }
 
-async function loadAddressDetailsByIds(addressIds) {
+function buildUserScopedSupabaseClient(accessToken) {
+  const token = String(accessToken || '').trim();
+  if (!token || !process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+    return null;
+  }
+
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    }
+  });
+}
+
+function setAddressDetails(detailsById, key, candidate) {
+  if (!Number.isFinite(key) || key <= 0) {
+    return;
+  }
+
+  const normalizedKey = Math.trunc(key);
+  const nextDetails = {
+    detailed_address: candidate?.detailed_address ?? null,
+    zipcode: candidate?.zipcode ?? null,
+    city: candidate?.city ?? null,
+    lat: candidate?.lat ?? null,
+    long: candidate?.long ?? null
+  };
+
+  const current = detailsById.get(normalizedKey);
+  const currentHasDetailed = Boolean(pickNonEmptyString(current?.detailed_address));
+  const nextHasDetailed = Boolean(pickNonEmptyString(nextDetails.detailed_address));
+  if (!current || (!currentHasDetailed && nextHasDetailed)) {
+    detailsById.set(normalizedKey, nextDetails);
+  }
+}
+
+async function loadAddressDetailsByIds(addressIds, options = {}) {
   if (!addressIds.length) {
     return new Map();
   }
@@ -121,60 +172,182 @@ async function loadAddressDetailsByIds(addressIds) {
   }
 
   const detailsById = new Map();
+  const normalizedTextIds = normalizedIds.map((value) => String(value));
+  const scopedClient = buildUserScopedSupabaseClient(options.accessToken);
+  const readers = scopedClient ? [scopedClient, supabaseAdmin] : [supabaseAdmin];
+  const importId = toOptionalPositiveInt(options.importId);
 
-  const { data: ordersRows, error: ordersError } = await supabaseAdmin
-    .from('orders')
-    .select('*')
-    .in('id', normalizedIds);
+  for (const reader of readers) {
+    let firstCriticalError = null;
 
-  if (!ordersError) {
-    for (const row of ordersRows || []) {
-      const id = Number(row.id);
-      if (!Number.isFinite(id) || id <= 0) {
-        continue;
+    const ordersIdQuery = reader.from('orders').select('*').in('id', normalizedIds);
+    const { data: ordersByIdRows, error: ordersByIdError } = importId
+      ? await ordersIdQuery.eq('import_id', importId)
+      : await ordersIdQuery;
+
+    if (ordersByIdError) {
+      if (!isMissingTableError(ordersByIdError, 'orders') && !isRelationMissing(ordersByIdError)) {
+        firstCriticalError = ordersByIdError;
       }
-      detailsById.set(Math.trunc(id), {
-        detailed_address: readDetailedAddress(row),
-        zipcode: readZipCode(row),
-        city: readCity(row),
-        lat: readLatitude(row),
-        long: readLongitude(row)
-      });
+    } else {
+      for (const row of ordersByIdRows || []) {
+        const id = Number(row.id);
+        setAddressDetails(detailsById, id, {
+          detailed_address: readDetailedAddress(row),
+          zipcode: readZipCode(row),
+          city: readCity(row),
+          lat: readLatitude(row),
+          long: readLongitude(row)
+        });
+      }
     }
-    return detailsById;
-  }
 
-  if (!isMissingTableError(ordersError, 'orders') && !isRelationMissing(ordersError)) {
-    throw new AppError(500, `Erro ao buscar endereços da rota: ${ordersError.message}`);
-  }
+    const ordersWaybillQuery = reader
+      .from('orders')
+      .select('*')
+      .in('Waybill Number', normalizedTextIds);
+    const { data: ordersByWaybillRows, error: ordersByWaybillError } = importId
+      ? await ordersWaybillQuery.eq('import_id', importId)
+      : await ordersWaybillQuery;
 
-  const { data: addressesRows, error: addressesError } = await supabaseAdmin
-    .from('addresses')
-    .select('*')
-    .in('id', normalizedIds);
-
-  if (addressesError) {
-    if (!isMissingTableError(addressesError, 'addresses') && !isRelationMissing(addressesError)) {
-      throw new AppError(500, `Erro ao buscar endereços da rota: ${addressesError.message}`);
+    if (ordersByWaybillError) {
+      if (
+        !firstCriticalError &&
+        !isMissingTableError(ordersByWaybillError, 'orders') &&
+        !isRelationMissing(ordersByWaybillError)
+      ) {
+        firstCriticalError = ordersByWaybillError;
+      }
+    } else {
+      for (const row of ordersByWaybillRows || []) {
+        const waybillAsInt = toOptionalPositiveInt(row['Waybill Number'] ?? row.waybill_number ?? row.waybillNumber);
+        setAddressDetails(detailsById, waybillAsInt || 0, {
+          detailed_address: readDetailedAddress(row),
+          zipcode: readZipCode(row),
+          city: readCity(row),
+          lat: readLatitude(row),
+          long: readLongitude(row)
+        });
+      }
     }
-    return detailsById;
-  }
 
-  for (const row of addressesRows || []) {
-    const id = Number(row.id);
-    if (!Number.isFinite(id) || id <= 0) {
-      continue;
+    const addressesByIdQuery = reader.from('addresses').select('*').in('id', normalizedIds);
+    const { data: addressesByIdRows, error: addressesByIdError } = await addressesByIdQuery;
+
+    if (addressesByIdError) {
+      if (
+        !firstCriticalError &&
+        !isMissingTableError(addressesByIdError, 'addresses') &&
+        !isRelationMissing(addressesByIdError)
+      ) {
+        firstCriticalError = addressesByIdError;
+      }
+    } else {
+      for (const row of addressesByIdRows || []) {
+        const id = Number(row.id);
+        const orderId = Number(row.order_id);
+        const details = {
+          detailed_address: readDetailedAddress(row),
+          zipcode: readZipCode(row),
+          city: readCity(row),
+          lat: readLatitude(row),
+          long: readLongitude(row)
+        };
+        setAddressDetails(detailsById, id, details);
+        setAddressDetails(detailsById, orderId, details);
+      }
     }
-    detailsById.set(Math.trunc(id), {
-      detailed_address: readDetailedAddress(row),
-      zipcode: readZipCode(row),
-      city: readCity(row),
-      lat: readLatitude(row),
-      long: readLongitude(row)
-    });
+
+    const addressesByOrderIdQuery = reader.from('addresses').select('*').in('order_id', normalizedIds);
+    const { data: addressesByOrderRows, error: addressesByOrderError } = await addressesByOrderIdQuery;
+    if (addressesByOrderError) {
+      if (
+        !firstCriticalError &&
+        !isMissingTableError(addressesByOrderError, 'addresses') &&
+        !isRelationMissing(addressesByOrderError)
+      ) {
+        firstCriticalError = addressesByOrderError;
+      }
+    } else {
+      for (const row of addressesByOrderRows || []) {
+        const id = Number(row.id);
+        const orderId = Number(row.order_id);
+        const details = {
+          detailed_address: readDetailedAddress(row),
+          zipcode: readZipCode(row),
+          city: readCity(row),
+          lat: readLatitude(row),
+          long: readLongitude(row)
+        };
+        setAddressDetails(detailsById, id, details);
+        setAddressDetails(detailsById, orderId, details);
+      }
+    }
+
+    if (detailsById.size >= normalizedIds.length) {
+      return detailsById;
+    }
+
+    if (firstCriticalError && reader === readers[readers.length - 1]) {
+      throw new AppError(500, `Erro ao buscar endereços da rota: ${firstCriticalError.message}`);
+    }
   }
 
   return detailsById;
+}
+
+async function hydrateRowsWithAddressDetails(rows, options = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return rows;
+  }
+
+  const missingAddressIds = rows
+    .filter((row) => {
+      const waypointId = row.waypoint_id ?? row.id;
+      if (waypointId === null || waypointId === undefined) {
+        return false;
+      }
+      return !readDetailedAddress(row);
+    })
+    .map((row) => Number(row.address_id))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => Math.trunc(value));
+
+  if (missingAddressIds.length === 0) {
+    return rows;
+  }
+
+  const detailsById = await loadAddressDetailsByIds(missingAddressIds, options);
+  if (detailsById.size === 0) {
+    return rows;
+  }
+
+  return rows.map((row) => {
+    const waypointId = row.waypoint_id ?? row.id;
+    if (waypointId === null || waypointId === undefined) {
+      return row;
+    }
+    if (readDetailedAddress(row)) {
+      return row;
+    }
+    const addressId = Number(row.address_id);
+    if (!Number.isFinite(addressId) || addressId <= 0) {
+      return row;
+    }
+    const details = detailsById.get(Math.trunc(addressId));
+    if (!details) {
+      return row;
+    }
+
+    return {
+      ...row,
+      detailed_address: details.detailed_address,
+      zipcode: details.zipcode,
+      city: details.city,
+      lat: details.lat,
+      long: details.long
+    };
+  });
 }
 
 async function getDriverByAuthUserId(authUserId) {
@@ -281,7 +454,7 @@ async function getRoutesFromView({ driverId, routeId, importId }) {
   return data || [];
 }
 
-async function getFallbackRows({ driverId, routeId, importId }) {
+async function getFallbackRows({ driverId, routeId, importId, accessToken }) {
   let routesQuery = supabaseAdmin.from('routes').select('*').eq('driver_id', driverId);
 
   if (routeId) {
@@ -325,7 +498,11 @@ async function getFallbackRows({ driverId, routeId, importId }) {
   const waypointAddressIds = (waypoints || [])
     .map((waypoint) => Number(waypoint.address_id))
     .filter((value) => Number.isFinite(value) && value > 0);
-  const addressDetailsById = await loadAddressDetailsByIds(waypointAddressIds);
+  const fallbackImportId = toOptionalPositiveInt(routes?.[0]?.import_id);
+  const addressDetailsById = await loadAddressDetailsByIds(waypointAddressIds, {
+    accessToken,
+    importId: toOptionalPositiveInt(importId) || fallbackImportId
+  });
 
   const rows = [];
   for (const route of routes) {
@@ -375,19 +552,23 @@ async function getFallbackRows({ driverId, routeId, importId }) {
   return rows;
 }
 
-async function getRoute(authUserId, routeIdParam) {
+async function getRoute(authUserId, routeIdParam, accessToken) {
   const driver = await getDriverByAuthUserId(authUserId);
 
   if (routeIdParam !== undefined && routeIdParam !== null && routeIdParam !== '') {
     const routeId = toPositiveInt(routeIdParam, 'route_id');
     const viewRows = await getRoutesFromView({ driverId: driver.id, routeId });
-    const rows = viewRows === null ? await getFallbackRows({ driverId: driver.id, routeId }) : viewRows;
+    const rows =
+      viewRows === null
+        ? await getFallbackRows({ driverId: driver.id, routeId, accessToken })
+        : viewRows;
 
     if (!rows.length) {
       throw new AppError(404, 'Nehuma rota encontrada');
     }
 
-    return formatRoutesResponse(rows, driver.id);
+    const hydratedRows = await hydrateRowsWithAddressDetails(rows, { accessToken });
+    return formatRoutesResponse(hydratedRows, driver.id);
   }
 
   const { data: latestRoute, error: latestRouteError } = await supabaseAdmin
@@ -410,13 +591,23 @@ async function getRoute(authUserId, routeIdParam) {
 
   const viewRows = await getRoutesFromView({ driverId: driver.id, importId: latestRoute.import_id });
   const rows =
-    viewRows === null ? await getFallbackRows({ driverId: driver.id, importId: latestRoute.import_id }) : viewRows;
+    viewRows === null
+      ? await getFallbackRows({
+          driverId: driver.id,
+          importId: latestRoute.import_id,
+          accessToken
+        })
+      : viewRows;
 
   if (!rows.length) {
     throw new AppError(404, 'Nehuma rota encontrada');
   }
 
-  return formatRoutesResponse(rows, driver.id);
+  const hydratedRows = await hydrateRowsWithAddressDetails(rows, {
+    accessToken,
+    importId: latestRoute.import_id
+  });
+  return formatRoutesResponse(hydratedRows, driver.id);
 }
 
 async function startRoute(authUserId, payload) {
