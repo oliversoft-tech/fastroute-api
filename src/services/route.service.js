@@ -29,6 +29,154 @@ function toPositiveInt(value, fieldName) {
   return Math.trunc(parsed);
 }
 
+function pickNonEmptyString(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) {
+      continue;
+    }
+    const text = String(value).trim();
+    if (text.length > 0) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function toNullableNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readDetailedAddress(row = {}) {
+  return pickNonEmptyString(
+    row.detailed_address,
+    row.detailedAddress,
+    row['Detailed address'],
+    row['detailed address'],
+    row['Detailed Address'],
+    row['Detailed address '],
+    row.address,
+    row.full_address,
+    row.fullAddress,
+    row['full address'],
+    row['Full address'],
+    row['Receiver to Street'],
+    row.receiver_to_street
+  );
+}
+
+function readZipCode(row = {}) {
+  return pickNonEmptyString(
+    row.zipcode,
+    row.zip_code,
+    row['Zip Code'],
+    row['zip code'],
+    row.cep
+  );
+}
+
+function readCity(row = {}) {
+  return pickNonEmptyString(
+    row.city,
+    row['The destination city'],
+    row['destination city'],
+    row['Receiver to City'],
+    row['receiver to city']
+  );
+}
+
+function readLatitude(row = {}) {
+  return toNullableNumber(
+    row.lat ??
+      row.latitude ??
+      row['Receiver to Latitude'] ??
+      row.receiver_to_latitude
+  );
+}
+
+function readLongitude(row = {}) {
+  return toNullableNumber(
+    row.long ??
+      row.lng ??
+      row.longitude ??
+      row['Receiver to Longitude'] ??
+      row.receiver_to_longitude
+  );
+}
+
+async function loadAddressDetailsByIds(addressIds) {
+  if (!addressIds.length) {
+    return new Map();
+  }
+
+  const normalizedIds = [...new Set(
+    addressIds
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .map((value) => Math.trunc(value))
+  )];
+
+  if (!normalizedIds.length) {
+    return new Map();
+  }
+
+  const detailsById = new Map();
+
+  const { data: ordersRows, error: ordersError } = await supabaseAdmin
+    .from('orders')
+    .select('*')
+    .in('id', normalizedIds);
+
+  if (!ordersError) {
+    for (const row of ordersRows || []) {
+      const id = Number(row.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        continue;
+      }
+      detailsById.set(Math.trunc(id), {
+        detailed_address: readDetailedAddress(row),
+        zipcode: readZipCode(row),
+        city: readCity(row),
+        lat: readLatitude(row),
+        long: readLongitude(row)
+      });
+    }
+    return detailsById;
+  }
+
+  if (!isMissingTableError(ordersError, 'orders') && !isRelationMissing(ordersError)) {
+    throw new AppError(500, `Erro ao buscar endereços da rota: ${ordersError.message}`);
+  }
+
+  const { data: addressesRows, error: addressesError } = await supabaseAdmin
+    .from('addresses')
+    .select('*')
+    .in('id', normalizedIds);
+
+  if (addressesError) {
+    if (!isMissingTableError(addressesError, 'addresses') && !isRelationMissing(addressesError)) {
+      throw new AppError(500, `Erro ao buscar endereços da rota: ${addressesError.message}`);
+    }
+    return detailsById;
+  }
+
+  for (const row of addressesRows || []) {
+    const id = Number(row.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      continue;
+    }
+    detailsById.set(Math.trunc(id), {
+      detailed_address: readDetailedAddress(row),
+      zipcode: readZipCode(row),
+      city: readCity(row),
+      lat: readLatitude(row),
+      long: readLongitude(row)
+    });
+  }
+
+  return detailsById;
+}
+
 async function getDriverByAuthUserId(authUserId) {
   const { data, error } = await supabaseAdmin
     .from('users')
@@ -85,8 +233,11 @@ function formatRoutesResponse(rows, driverId) {
       address_id: row.address_id ?? null,
       seq_order: row.seq_order ?? null,
       status: row.waypoint_status ?? row.status ?? null,
-      lat: row.lat ?? null,
-      long: row.long ?? row.longitude ?? null
+      detailed_address: readDetailedAddress(row),
+      zipcode: readZipCode(row),
+      city: readCity(row),
+      lat: readLatitude(row),
+      long: readLongitude(row)
     });
   }
 
@@ -171,6 +322,11 @@ async function getFallbackRows({ driverId, routeId, importId }) {
     byRouteId.get(key).push(waypoint);
   }
 
+  const waypointAddressIds = (waypoints || [])
+    .map((waypoint) => Number(waypoint.address_id))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const addressDetailsById = await loadAddressDetailsByIds(waypointAddressIds);
+
   const rows = [];
   for (const route of routes) {
     const routeWaypoints = byRouteId.get(Number(route.id)) || [];
@@ -189,6 +345,12 @@ async function getFallbackRows({ driverId, routeId, importId }) {
     }
 
     for (const waypoint of routeWaypoints) {
+      const addressId = Number(waypoint.address_id);
+      const addressDetails =
+        Number.isFinite(addressId) && addressId > 0
+          ? addressDetailsById.get(Math.trunc(addressId))
+          : null;
+
       rows.push({
         route_id: route.id,
         import_id: route.import_id,
@@ -200,7 +362,12 @@ async function getFallbackRows({ driverId, routeId, importId }) {
         waypoint_id: waypoint.id,
         address_id: waypoint.address_id,
         seq_order: waypoint.seq_order,
-        waypoint_status: waypoint.status
+        waypoint_status: waypoint.status,
+        detailed_address: addressDetails?.detailed_address ?? null,
+        zipcode: addressDetails?.zipcode ?? null,
+        city: addressDetails?.city ?? null,
+        lat: addressDetails?.lat ?? null,
+        long: addressDetails?.long ?? null
       });
     }
   }
