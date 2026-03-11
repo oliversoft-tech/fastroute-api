@@ -811,18 +811,27 @@ function toFiniteNumber(value) {
   return Number.isFinite(parsed) ? parsed : NaN;
 }
 
+function resolveAddressIdFromImportRow(row, index) {
+  const addressIdRaw =
+    row.address_id ??
+    row.addressId ??
+    row.id ??
+    row['Address ID'] ??
+    row['address id'] ??
+    row['Waybill Number'];
+
+  const addressIdMaybe = toFiniteNumber(addressIdRaw);
+  if (Number.isFinite(addressIdMaybe) && addressIdMaybe > 0) {
+    return Math.trunc(addressIdMaybe);
+  }
+
+  return index + 1;
+}
+
 function extractAddressPoints(rows) {
   const out = [];
 
   rows.forEach((row, index) => {
-    const addressIdRaw =
-      row.address_id ??
-      row.addressId ??
-      row.id ??
-      row['Address ID'] ??
-      row['address id'] ??
-      row['Waybill Number'];
-
     const latRaw =
       row.lat ??
       row.latitude ??
@@ -846,9 +855,7 @@ function extractAddressPoints(rows) {
       return;
     }
 
-    const addressIdMaybe = toFiniteNumber(addressIdRaw);
-    const addressId =
-      Number.isFinite(addressIdMaybe) && addressIdMaybe > 0 ? Math.trunc(addressIdMaybe) : index + 1;
+    const addressId = resolveAddressIdFromImportRow(row, index);
 
     const cluster = toFiniteNumber(clusterRaw);
 
@@ -861,6 +868,133 @@ function extractAddressPoints(rows) {
   });
 
   return out;
+}
+
+function buildAddressDetailFromImportRow(row, addressId) {
+  const detailedAddress = pickNonEmptyString(
+    row.detailed_address,
+    row['Detailed address'],
+    row['Detailed Address'],
+    row['Detailed address '],
+    row['detailed address'],
+    row['Receiver to Street'],
+    row.receiver_to_street,
+    row.address,
+    row.street,
+    row.logradouro,
+    row.rua
+  );
+  const zipCode = pickNonEmptyString(
+    row.zipcode,
+    row['Zip Code'],
+    row['zip code'],
+    row.zip_code,
+    row.cep
+  );
+  const city = pickNonEmptyString(
+    row.city,
+    row['The destination city'],
+    row['destination city'],
+    row['Receiver to City'],
+    row['receiver to city']
+  );
+  const lat = toNullableNumber(
+    row.lat ??
+      row.latitude ??
+      row['Receiver to Latitude'] ??
+      row.receiver_to_latitude ??
+      row['Actual delivery Latitude'] ??
+      row.actual_delivery_latitude
+  );
+  const long = toNullableNumber(
+    row.long ??
+      row.longitude ??
+      row.lng ??
+      row['Receiver to Longitude'] ??
+      row.receiver_to_longitude ??
+      row['Actual delivery  Longitude'] ??
+      row.actual_delivery_longitude
+  );
+  const waybill = pickNonEmptyString(
+    row['Waybill Number'],
+    row.waybill_number,
+    row.waybill,
+    addressId
+  );
+  const contactPhone = pickNonEmptyString(
+    row['Contact Phone'],
+    row.contact_phone,
+    row.phone,
+    row.numero_whatsapp,
+    'N/A'
+  );
+
+  return {
+    detailed_address: detailedAddress,
+    zipcode: zipCode,
+    city,
+    lat,
+    long,
+    waybill_number: waybill || String(addressId),
+    contact_phone: contactPhone || 'N/A'
+  };
+}
+
+function buildAddressDetailMapFromImportRows(rows) {
+  const byAddressId = new Map();
+
+  rows.forEach((row, index) => {
+    const addressId = resolveAddressIdFromImportRow(row, index);
+    const nextDetails = buildAddressDetailFromImportRow(row, addressId);
+    const current = byAddressId.get(addressId);
+
+    const currentHasDetailed = Boolean(pickNonEmptyString(current?.detailed_address));
+    const nextHasDetailed = Boolean(pickNonEmptyString(nextDetails.detailed_address));
+    if (!current || (!currentHasDetailed && nextHasDetailed)) {
+      byAddressId.set(addressId, nextDetails);
+    }
+  });
+
+  return byAddressId;
+}
+
+async function persistOrdersForImport(importId, addressDetailsById) {
+  const importIdAsInt = toOptionalPositiveInt(importId);
+  if (!importIdAsInt || !(addressDetailsById instanceof Map) || addressDetailsById.size === 0) {
+    return;
+  }
+
+  const insertRows = [];
+  const usedWaybill = new Set();
+
+  for (const [addressId, details] of addressDetailsById.entries()) {
+    const waybill = pickNonEmptyString(details?.waybill_number, String(addressId));
+    if (!waybill || usedWaybill.has(waybill)) {
+      continue;
+    }
+
+    usedWaybill.add(waybill);
+    insertRows.push({
+      'Waybill Number': waybill,
+      'Detailed address': details?.detailed_address ?? '',
+      'Zip Code': details?.zipcode ?? '',
+      'The destination city': details?.city ?? '',
+      'Receiver to Latitude': details?.lat ?? '',
+      'Receiver to Longitude': details?.long ?? '',
+      'Contact Phone': details?.contact_phone ?? 'N/A',
+      import_id: importIdAsInt
+    });
+  }
+
+  if (!insertRows.length) {
+    return;
+  }
+
+  const { error } = await supabaseAdmin.from('orders').insert(insertRows);
+  if (error && !isMissingTableError(error, 'orders') && !isRelationMissing(error)) {
+    // Não bloqueia importação de rota; apenas mantém fallback de endereço indisponível.
+    console.warn(`Falha ao persistir orders da importação ${importIdAsInt}: ${error.message}`);
+  }
 }
 
 async function createImportRecord(driverId, originalName) {
@@ -895,6 +1029,7 @@ async function importRoute(authUserId, file, options = {}) {
 
   const driver = await getDriverByAuthUserId(authUserId);
   const rows = parseImportRows(file);
+  const importAddressDetailsById = buildAddressDetailMapFromImportRows(rows);
   const points = extractAddressPoints(rows);
 
   const dbscan = dbscanDefaults({
@@ -919,6 +1054,7 @@ async function importRoute(authUserId, file, options = {}) {
 
   const grouped = groupByClusterId(points);
   const importId = await createImportRecord(driver.id, file.originalname || 'import.csv');
+  await persistOrdersForImport(importId, importAddressDetailsById);
 
   const clusterIds = Object.keys(grouped)
     .map((value) => Number(value))
@@ -984,7 +1120,12 @@ async function importRoute(authUserId, file, options = {}) {
         waypoint_id: waypoint.id,
         address_id: waypoint.address_id,
         seq_order: waypoint.seq_order,
-        status: waypoint.status
+        status: waypoint.status,
+        detailed_address: importAddressDetailsById.get(Number(waypoint.address_id))?.detailed_address ?? null,
+        zipcode: importAddressDetailsById.get(Number(waypoint.address_id))?.zipcode ?? null,
+        city: importAddressDetailsById.get(Number(waypoint.address_id))?.city ?? null,
+        lat: importAddressDetailsById.get(Number(waypoint.address_id))?.lat ?? null,
+        long: importAddressDetailsById.get(Number(waypoint.address_id))?.long ?? null
       }))
     });
   }
