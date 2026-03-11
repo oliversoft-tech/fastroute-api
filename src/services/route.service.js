@@ -22,6 +22,11 @@ function isMissingTableError(error, tableName) {
   return message.includes('could not find the table') && message.includes(`'public.${String(tableName || '').toLowerCase()}'`);
 }
 
+function isDuplicateKeyError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return error?.code === '23505' || message.includes('duplicate key value');
+}
+
 function toPositiveInt(value, fieldName) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -231,6 +236,41 @@ async function loadAddressDetailsByIds(addressIds, options = {}) {
       }
     }
 
+    if (importId) {
+      const { data: ordersByImportRows, error: ordersByImportError } = await reader
+        .from('orders')
+        .select('*')
+        .eq('import_id', importId)
+        .order('id', { ascending: true });
+
+      if (ordersByImportError) {
+        if (
+          !firstCriticalError &&
+          !isMissingTableError(ordersByImportError, 'orders') &&
+          !isRelationMissing(ordersByImportError)
+        ) {
+          firstCriticalError = ordersByImportError;
+        }
+      } else {
+        for (const [index, row] of (ordersByImportRows || []).entries()) {
+          const details = {
+            detailed_address: readDetailedAddress(row),
+            zipcode: readZipCode(row),
+            city: readCity(row),
+            lat: readLatitude(row),
+            long: readLongitude(row)
+          };
+          const rowId = Number(row.id);
+          const waybillAsInt = toOptionalPositiveInt(row['Waybill Number'] ?? row.waybill_number ?? row.waybillNumber);
+          // Fallback para imports em que route_waypoints.address_id foi gerado por posição da linha.
+          const importRowIndexAddressId = index + 1;
+          setAddressDetails(detailsById, rowId, details);
+          setAddressDetails(detailsById, waybillAsInt || 0, details);
+          setAddressDetails(detailsById, importRowIndexAddressId, details);
+        }
+      }
+    }
+
     const addressesByIdQuery = reader.from('addresses').select('*').in('id', normalizedIds);
     const { data: addressesByIdRows, error: addressesByIdError } = await addressesByIdQuery;
 
@@ -301,6 +341,10 @@ async function hydrateRowsWithAddressDetails(rows, options = {}) {
     return rows;
   }
 
+  const inferredImportId = toOptionalPositiveInt(
+    options.importId ??
+      rows.find((row) => row?.import_id !== undefined && row?.import_id !== null)?.import_id
+  );
   const missingAddressIds = rows
     .filter((row) => {
       const waypointId = row.waypoint_id ?? row.id;
@@ -317,7 +361,10 @@ async function hydrateRowsWithAddressDetails(rows, options = {}) {
     return rows;
   }
 
-  const detailsById = await loadAddressDetailsByIds(missingAddressIds, options);
+  const detailsById = await loadAddressDetailsByIds(missingAddressIds, {
+    ...options,
+    importId: inferredImportId
+  });
   if (detailsById.size === 0) {
     return rows;
   }
@@ -567,7 +614,13 @@ async function getRoute(authUserId, routeIdParam, accessToken) {
       throw new AppError(404, 'Nehuma rota encontrada');
     }
 
-    const hydratedRows = await hydrateRowsWithAddressDetails(rows, { accessToken });
+    const inferredImportId = toOptionalPositiveInt(
+      rows.find((entry) => entry?.import_id !== undefined && entry?.import_id !== null)?.import_id
+    );
+    const hydratedRows = await hydrateRowsWithAddressDetails(rows, {
+      accessToken,
+      importId: inferredImportId
+    });
     return formatRoutesResponse(hydratedRows, driver.id);
   }
 
@@ -991,9 +1044,39 @@ async function persistOrdersForImport(importId, addressDetailsById) {
   }
 
   const { error } = await supabaseAdmin.from('orders').insert(insertRows);
-  if (error && !isMissingTableError(error, 'orders') && !isRelationMissing(error)) {
-    // Não bloqueia importação de rota; apenas mantém fallback de endereço indisponível.
-    console.warn(`Falha ao persistir orders da importação ${importIdAsInt}: ${error.message}`);
+  if (!error) {
+    return;
+  }
+
+  if (isMissingTableError(error, 'orders') || isRelationMissing(error)) {
+    return;
+  }
+
+  let persistedAny = false;
+  let firstCriticalError = null;
+  for (const row of insertRows) {
+    const { error: rowError } = await supabaseAdmin.from('orders').insert(row);
+    if (!rowError) {
+      persistedAny = true;
+      continue;
+    }
+    if (isDuplicateKeyError(rowError)) {
+      persistedAny = true;
+      continue;
+    }
+    if (isMissingTableError(rowError, 'orders') || isRelationMissing(rowError)) {
+      return;
+    }
+    if (!firstCriticalError) {
+      firstCriticalError = rowError;
+    }
+  }
+
+  if (firstCriticalError && !persistedAny) {
+    throw new AppError(
+      500,
+      `Erro ao persistir linhas de importação em orders: ${firstCriticalError.message}`
+    );
   }
 }
 
