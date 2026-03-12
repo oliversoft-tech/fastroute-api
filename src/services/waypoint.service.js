@@ -45,6 +45,45 @@ function parseStoragePath(urlPhoto, fallbackBucket) {
   return null;
 }
 
+function isMissingColumnError(error, columnName) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('column') && message.includes(String(columnName || '').toLowerCase()) && message.includes('does not exist');
+}
+
+async function getWaypointWithCompatiblePhotoColumns(waypointId) {
+  const withUrlPhoto = await supabaseAdmin
+    .from('route_waypoints')
+    .select('id, route_id, url_photo')
+    .eq('id', waypointId)
+    .maybeSingle();
+
+  if (!withUrlPhoto.error) {
+    return withUrlPhoto;
+  }
+
+  if (!isMissingColumnError(withUrlPhoto.error, 'url_photo')) {
+    return withUrlPhoto;
+  }
+
+  const fallback = await supabaseAdmin
+    .from('route_waypoints')
+    .select('id, route_id')
+    .eq('id', waypointId)
+    .maybeSingle();
+
+  if (fallback.error) {
+    return fallback;
+  }
+
+  return {
+    data: {
+      ...fallback.data,
+      url_photo: null
+    },
+    error: null
+  };
+}
+
 async function finishWaypoint(authUserId, payload, file) {
   const schema = z.object({
     waypoint_id: z.union([z.number(), z.string()]),
@@ -171,11 +210,7 @@ async function getWaypointPhoto(waypointIdParam) {
   const bucketDefault = process.env.WAYPOINT_PHOTOS_BUCKET || 'delivery-photos';
   const expiresIn = Number(process.env.SIGNED_URL_EXPIRES_IN || 300);
 
-  const { data: waypoint, error: waypointError } = await supabaseAdmin
-    .from('route_waypoints')
-    .select('id, route_id, url_photo')
-    .eq('id', waypointId)
-    .maybeSingle();
+  const { data: waypoint, error: waypointError } = await getWaypointWithCompatiblePhotoColumns(waypointId);
 
   if (waypointError) {
     throw new AppError(500, `Erro ao buscar waypoint: ${waypointError.message}`);
@@ -190,7 +225,7 @@ async function getWaypointPhoto(waypointIdParam) {
   if (!storageTarget) {
     const { data: photoRow, error: photoError } = await supabaseAdmin
       .from('waypoint_delivery_photo')
-      .select('object_path')
+      .select('bucket, object_path')
       .eq('waypoint_id', waypointId)
       .order('id', { ascending: false })
       .limit(1)
@@ -205,7 +240,7 @@ async function getWaypointPhoto(waypointIdParam) {
     }
 
     storageTarget = {
-      bucket: bucketDefault,
+      bucket: String(photoRow.bucket || bucketDefault),
       path: photoRow.object_path
     };
   }

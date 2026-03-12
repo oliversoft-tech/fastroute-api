@@ -18,6 +18,12 @@ function toPositiveInt(value) {
 }
 
 function toNonNegativeInt(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === 'string' && value.trim().length === 0) {
+    return null;
+  }
   const parsed = Math.trunc(Number(value));
   if (!Number.isFinite(parsed) || parsed < 0) {
     return null;
@@ -311,6 +317,10 @@ const WAYPOINT_TRANSIENT_FIELDS = new Set([
   'userId',
   'image_uri',
   'imageUri',
+  'image_base64',
+  'imageBase64',
+  'image_mime_type',
+  'imageMimeType',
   'photo_url',
   'photoUrl',
   'object_path',
@@ -433,13 +443,22 @@ function parseWaypointPhotoInput(rawPayload, entityId, fallbackRouteId) {
     toNonEmptyString(payload.imageUri) ??
     toNonEmptyString(payload.photo_url) ??
     toNonEmptyString(payload.photoUrl);
-  const objectPath =
+  const imageBase64 =
+    toNonEmptyString(photo.image_base64) ??
+    toNonEmptyString(photo.imageBase64) ??
+    toNonEmptyString(payload.image_base64) ??
+    toNonEmptyString(payload.imageBase64);
+  const imageMimeType =
+    toNonEmptyString(photo.image_mime_type) ??
+    toNonEmptyString(photo.imageMimeType) ??
+    toNonEmptyString(payload.image_mime_type) ??
+    toNonEmptyString(payload.imageMimeType);
+  const objectPathFromPayload =
     toNonEmptyString(photo.object_path) ??
     toNonEmptyString(photo.objectPath) ??
     toNonEmptyString(payload.object_path) ??
-    toNonEmptyString(payload.objectPath) ??
-    buildObjectPathFromImageReference(imageReference, fileName);
-  const finalFileName = fileName ?? basenameFromPath(objectPath);
+    toNonEmptyString(payload.objectPath);
+  const objectPathFromReference = buildObjectPathFromImageReference(imageReference, fileName);
 
   const fileSizeBytes =
     toNonNegativeInt(photo.file_size_bytes ?? photo.fileSizeBytes) ??
@@ -467,12 +486,18 @@ function parseWaypointPhotoInput(rawPayload, entityId, fallbackRouteId) {
     Object.keys(photo).length > 0 ||
     Boolean(fileName) ||
     Boolean(imageReference) ||
-    Boolean(objectPath) ||
+    Boolean(imageBase64) ||
+    Boolean(objectPathFromPayload) ||
+    Boolean(objectPathFromReference) ||
     fileSizeBytes !== null;
 
   if (!hasAnyPhotoField) {
     return null;
   }
+
+  const fallbackFileName = fileName ?? (toPositiveInt(entityId) ? `photo_${toPositiveInt(entityId)}.jpg` : null);
+  const objectPath = objectPathFromPayload ?? objectPathFromReference ?? fallbackFileName;
+  const finalFileName = fileName ?? basenameFromPath(objectPath) ?? fallbackFileName;
 
   return {
     waypointId: toPositiveInt(photo.waypoint_id ?? photo.waypointId) ?? toPositiveInt(entityId) ?? null,
@@ -481,7 +506,69 @@ function parseWaypointPhotoInput(rawPayload, entityId, fallbackRouteId) {
     fileName: finalFileName,
     objectPath,
     fileSizeBytes,
-    bucket
+    bucket,
+    imageBase64,
+    imageMimeType
+  };
+}
+
+function parseBase64Input(rawValue) {
+  const normalizedValue = toNonEmptyString(rawValue);
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const dataUriMatch = normalizedValue.match(/^data:([^;]+);base64,(.+)$/i);
+  const mimeTypeFromDataUri = toNonEmptyString(dataUriMatch?.[1]);
+  const rawBase64 = dataUriMatch?.[2] ?? normalizedValue;
+  const compactBase64 = rawBase64.replace(/\s+/g, '').trim();
+  if (!compactBase64) {
+    return null;
+  }
+
+  try {
+    const bytes = Buffer.from(compactBase64, 'base64');
+    if (!bytes || bytes.length === 0) {
+      return null;
+    }
+
+    return {
+      bytes,
+      mimeTypeFromDataUri
+    };
+  } catch {
+    throw new AppError(400, 'Payload de waypoint com foto inválido: image_base64 malformado.');
+  }
+}
+
+async function uploadWaypointPhotoFromSync(photoInput) {
+  const parsedBase64 = parseBase64Input(photoInput?.imageBase64);
+  if (!parsedBase64) {
+    return null;
+  }
+
+  const bucket = toNonEmptyString(photoInput?.bucket) ?? 'delivery-photos';
+  const objectPath = toNonEmptyString(photoInput?.objectPath);
+  if (!objectPath) {
+    throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: object_path ausente.');
+  }
+
+  const contentType =
+    toNonEmptyString(photoInput?.imageMimeType) ??
+    toNonEmptyString(parsedBase64.mimeTypeFromDataUri) ??
+    'image/jpeg';
+
+  const { error } = await supabaseAdmin.storage.from(bucket).upload(objectPath, parsedBase64.bytes, {
+    contentType,
+    upsert: true
+  });
+
+  if (error) {
+    throw new AppError(500, `Erro no upload da foto via sync: ${error.message}`);
+  }
+
+  return {
+    fileSizeBytes: parsedBase64.bytes.length
   };
 }
 
@@ -592,10 +679,15 @@ async function persistWaypointDeliveryPhotoFromSyncMutation(mutation, currentWay
     throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: object_path ausente.');
   }
 
+  const uploaded = await uploadWaypointPhotoFromSync(photoInput);
   const resolvedUserId = await resolveWaypointPhotoUserId(photoInput, mutation);
   if (!resolvedUserId) {
     throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: user_id ausente.');
   }
+
+  const normalizedFileSizeBytes =
+    toNonNegativeInt(photoInput.fileSizeBytes) ??
+    toNonNegativeInt(uploaded?.fileSizeBytes);
 
   const normalizedPhotoPayload = compactObject({
     waypoint_id: waypointId,
@@ -604,7 +696,7 @@ async function persistWaypointDeliveryPhotoFromSyncMutation(mutation, currentWay
     bucket: toNonEmptyString(photoInput.bucket) ?? 'delivery-photos',
     object_path: toNonEmptyString(photoInput.objectPath),
     file_name: toNonEmptyString(photoInput.fileName),
-    file_size_bytes: toNonNegativeInt(photoInput.fileSizeBytes)
+    file_size_bytes: normalizedFileSizeBytes
   });
 
   const { data: existing, error: selectPhotoError } = await supabaseAdmin

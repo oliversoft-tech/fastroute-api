@@ -416,10 +416,43 @@ function createFakeSupabase(initial = {}, options = {}) {
     }
   }
 
+  const storageUploads = [];
+
   return {
     state,
+    storageUploads,
     from(tableName) {
       return new Query(tableName);
+    },
+    storage: {
+      from(bucket) {
+        return {
+          async upload(objectPath, body, uploadOptions = {}) {
+            const asString = typeof body === 'string' ? body : null;
+            const asBuffer = Buffer.isBuffer(body) ? body : null;
+            const byteLength = asBuffer
+              ? asBuffer.length
+              : asString
+                ? Buffer.byteLength(asString)
+                : Number(body?.byteLength || 0);
+            const uploadEntry = {
+              bucket,
+              objectPath,
+              contentType: uploadOptions.contentType,
+              upsert: Boolean(uploadOptions.upsert),
+              byteLength
+            };
+            storageUploads.push(uploadEntry);
+
+            const hookError = toError(options.onStorageUpload?.(uploadEntry));
+            if (hookError) {
+              return { data: null, error: hookError };
+            }
+
+            return { data: { path: objectPath }, error: null };
+          }
+        };
+      }
     }
   };
 }
@@ -1342,6 +1375,60 @@ test('sync API: route_waypoint UPDATE persiste foto em waypoint_delivery_photo q
       object_path: 'photo_9951.jpg',
       file_name: 'photo_9951.jpg',
       file_size_bytes: 123456
+    });
+  });
+});
+
+test('sync API: route_waypoint UPDATE faz upload do image_base64 e persiste metadados da foto', async () => {
+  const fakeSupabase = createFakeSupabase({
+    route_waypoints: [{ id: 9952, route_id: 995, seq_order: 2, status: 'PENDENTE', version: 1 }],
+    routes: [{ id: 995, import_id: 700, driver_id: 77, cluster_id: 1, status: 'EM_ANDAMENTO', version: 1 }],
+    orders_import: [{ id: 700, user_id: 77, status: 'SEM_ROTA' }],
+    users: [{ id: 77, auth_user_id: '77' }]
+  });
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await pushOne(baseUrl, {
+      deviceId: 'device-11bb',
+      mutationId: 'm-waypoint-update-photo-base64-upload',
+      entityType: 'route_waypoint',
+      entityId: 9952,
+      op: 'UPDATE',
+      baseVersion: 1,
+      payload: {
+        route_id: 995,
+        status: 'CONCLUIDO',
+        file_name: 'photo_9952.jpg',
+        user_id: 77,
+        image_base64: Buffer.from('hello-world').toString('base64'),
+        image_mime_type: 'image/jpeg'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    assert.equal(fakeSupabase.storageUploads.length, 1);
+    assert.deepEqual(fakeSupabase.storageUploads[0], {
+      bucket: 'delivery-photos',
+      objectPath: 'photo_9952.jpg',
+      contentType: 'image/jpeg',
+      upsert: true,
+      byteLength: 11
+    });
+
+    const photoRows = fakeSupabase.state.waypoint_delivery_photo || [];
+    assert.equal(photoRows.length, 1);
+    assert.deepEqual(photoRows[0], {
+      id: 1,
+      waypoint_id: 9952,
+      route_id: 995,
+      user_id: 77,
+      bucket: 'delivery-photos',
+      object_path: 'photo_9952.jpg',
+      file_name: 'photo_9952.jpg',
+      file_size_bytes: 11
     });
   });
 });
