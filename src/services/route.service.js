@@ -160,6 +160,142 @@ function setAddressDetails(detailsById, key, candidate) {
   }
 }
 
+function hydrateDetailsMapFromOrdersRows(detailsById, rows, options = {}) {
+  const includeIndexFallback = options.includeIndexFallback === true;
+  for (const [index, row] of (rows || []).entries()) {
+    const details = {
+      detailed_address: readDetailedAddress(row),
+      zipcode: readZipCode(row),
+      city: readCity(row),
+      lat: readLatitude(row),
+      long: readLongitude(row)
+    };
+    const rowId = Number(row.id);
+    const waybillAsInt = toOptionalPositiveInt(row['Waybill Number'] ?? row.waybill_number ?? row.waybillNumber);
+    setAddressDetails(detailsById, rowId, details);
+    setAddressDetails(detailsById, waybillAsInt || 0, details);
+    if (includeIndexFallback) {
+      // Fallback para imports em que route_waypoints.address_id foi gerado por posição da linha.
+      const importRowIndexAddressId = index + 1;
+      setAddressDetails(detailsById, importRowIndexAddressId, details);
+    }
+  }
+}
+
+async function listRecentImportIdsForDriver(driverId) {
+  const parsedDriverId = toOptionalPositiveInt(driverId);
+  if (!parsedDriverId) {
+    return [];
+  }
+
+  const candidates = [];
+  for (const tableName of ['orders_import', 'imports']) {
+    const { data, error } = await supabaseAdmin
+      .from(tableName)
+      .select('id, created_at')
+      .eq('user_id', parsedDriverId)
+      .order('created_at', { ascending: false })
+      .limit(25);
+
+    if (error) {
+      if (!isMissingTableError(error, tableName) && !isRelationMissing(error)) {
+        throw new AppError(500, `Erro ao buscar importações do motorista: ${error.message}`);
+      }
+      continue;
+    }
+
+    for (const row of data || []) {
+      const id = toOptionalPositiveInt(row.id);
+      if (!id) {
+        continue;
+      }
+      candidates.push({
+        id,
+        createdAtMs: Date.parse(String(row.created_at || '')) || 0
+      });
+    }
+  }
+
+  if (!candidates.length) {
+    return [];
+  }
+
+  candidates.sort((a, b) => b.createdAtMs - a.createdAtMs);
+  return [...new Set(candidates.map((entry) => entry.id))];
+}
+
+function countDetailedCoverage(detailsById, targetIds) {
+  const wanted = new Set((targetIds || []).map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0));
+  if (wanted.size === 0) {
+    return 0;
+  }
+
+  let covered = 0;
+  for (const id of wanted) {
+    const detail = detailsById.get(Math.trunc(id));
+    if (pickNonEmptyString(detail?.detailed_address)) {
+      covered += 1;
+    }
+  }
+  return covered;
+}
+
+async function hydrateDetailsFromNeighborImports(detailsById, options = {}) {
+  const importId = toOptionalPositiveInt(options.importId);
+  const driverId = toOptionalPositiveInt(options.driverId);
+  if (!importId || !driverId) {
+    return;
+  }
+
+  const targetIds = Array.isArray(options.targetIds)
+    ? options.targetIds
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .map((value) => Math.trunc(value))
+    : [];
+
+  const recentImportIds = await listRecentImportIdsForDriver(driverId);
+  const fallbackImportIds = recentImportIds.filter((id) => id !== importId).slice(0, 5);
+  let bestCandidateMap = null;
+  let bestCandidateCoverage = 0;
+
+  for (const fallbackImportId of fallbackImportIds) {
+    const { data: ordersByImportRows, error: ordersByImportError } = await supabaseAdmin
+      .from('orders')
+      .select('*')
+      .eq('import_id', fallbackImportId)
+      .order('id', { ascending: true });
+
+    if (ordersByImportError) {
+      if (!isMissingTableError(ordersByImportError, 'orders') && !isRelationMissing(ordersByImportError)) {
+        throw new AppError(500, `Erro ao buscar endereços da rota: ${ordersByImportError.message}`);
+      }
+      continue;
+    }
+
+    if (!ordersByImportRows || ordersByImportRows.length === 0) {
+      continue;
+    }
+
+    const candidateMap = new Map();
+    hydrateDetailsMapFromOrdersRows(candidateMap, ordersByImportRows, { includeIndexFallback: true });
+    const candidateCoverage = countDetailedCoverage(candidateMap, targetIds);
+
+    if (candidateCoverage > bestCandidateCoverage) {
+      bestCandidateCoverage = candidateCoverage;
+      bestCandidateMap = candidateMap;
+    }
+  }
+
+  if (!bestCandidateMap || bestCandidateCoverage <= 0) {
+    return;
+  }
+
+  for (const [key, value] of bestCandidateMap.entries()) {
+    setAddressDetails(detailsById, key, value);
+  }
+}
+
 async function loadAddressDetailsByIds(addressIds, options = {}) {
   if (!addressIds.length) {
     return new Map();
@@ -195,16 +331,7 @@ async function loadAddressDetailsByIds(addressIds, options = {}) {
         firstCriticalError = ordersByIdError;
       }
     } else {
-      for (const row of ordersByIdRows || []) {
-        const id = Number(row.id);
-        setAddressDetails(detailsById, id, {
-          detailed_address: readDetailedAddress(row),
-          zipcode: readZipCode(row),
-          city: readCity(row),
-          lat: readLatitude(row),
-          long: readLongitude(row)
-        });
-      }
+      hydrateDetailsMapFromOrdersRows(detailsById, ordersByIdRows);
     }
 
     const ordersWaybillQuery = reader
@@ -224,16 +351,7 @@ async function loadAddressDetailsByIds(addressIds, options = {}) {
         firstCriticalError = ordersByWaybillError;
       }
     } else {
-      for (const row of ordersByWaybillRows || []) {
-        const waybillAsInt = toOptionalPositiveInt(row['Waybill Number'] ?? row.waybill_number ?? row.waybillNumber);
-        setAddressDetails(detailsById, waybillAsInt || 0, {
-          detailed_address: readDetailedAddress(row),
-          zipcode: readZipCode(row),
-          city: readCity(row),
-          lat: readLatitude(row),
-          long: readLongitude(row)
-        });
-      }
+      hydrateDetailsMapFromOrdersRows(detailsById, ordersByWaybillRows);
     }
 
     if (importId) {
@@ -252,22 +370,7 @@ async function loadAddressDetailsByIds(addressIds, options = {}) {
           firstCriticalError = ordersByImportError;
         }
       } else {
-        for (const [index, row] of (ordersByImportRows || []).entries()) {
-          const details = {
-            detailed_address: readDetailedAddress(row),
-            zipcode: readZipCode(row),
-            city: readCity(row),
-            lat: readLatitude(row),
-            long: readLongitude(row)
-          };
-          const rowId = Number(row.id);
-          const waybillAsInt = toOptionalPositiveInt(row['Waybill Number'] ?? row.waybill_number ?? row.waybillNumber);
-          // Fallback para imports em que route_waypoints.address_id foi gerado por posição da linha.
-          const importRowIndexAddressId = index + 1;
-          setAddressDetails(detailsById, rowId, details);
-          setAddressDetails(detailsById, waybillAsInt || 0, details);
-          setAddressDetails(detailsById, importRowIndexAddressId, details);
-        }
+        hydrateDetailsMapFromOrdersRows(detailsById, ordersByImportRows, { includeIndexFallback: true });
       }
     }
 
@@ -333,6 +436,14 @@ async function loadAddressDetailsByIds(addressIds, options = {}) {
     }
   }
 
+  if (detailsById.size === 0) {
+    await hydrateDetailsFromNeighborImports(detailsById, {
+      importId,
+      driverId: options.driverId,
+      targetIds: normalizedIds
+    });
+  }
+
   return detailsById;
 }
 
@@ -363,7 +474,8 @@ async function hydrateRowsWithAddressDetails(rows, options = {}) {
 
   const detailsById = await loadAddressDetailsByIds(missingAddressIds, {
     ...options,
-    importId: inferredImportId
+    importId: inferredImportId,
+    driverId: options.driverId
   });
   if (detailsById.size === 0) {
     return rows;
@@ -548,7 +660,8 @@ async function getFallbackRows({ driverId, routeId, importId, accessToken }) {
   const fallbackImportId = toOptionalPositiveInt(routes?.[0]?.import_id);
   const addressDetailsById = await loadAddressDetailsByIds(waypointAddressIds, {
     accessToken,
-    importId: toOptionalPositiveInt(importId) || fallbackImportId
+    importId: toOptionalPositiveInt(importId) || fallbackImportId,
+    driverId
   });
 
   const rows = [];
@@ -619,7 +732,8 @@ async function getRoute(authUserId, routeIdParam, accessToken) {
     );
     const hydratedRows = await hydrateRowsWithAddressDetails(rows, {
       accessToken,
-      importId: inferredImportId
+      importId: inferredImportId,
+      driverId: driver.id
     });
     return formatRoutesResponse(hydratedRows, driver.id);
   }
@@ -658,7 +772,8 @@ async function getRoute(authUserId, routeIdParam, accessToken) {
 
   const hydratedRows = await hydrateRowsWithAddressDetails(rows, {
     accessToken,
-    importId: latestRoute.import_id
+    importId: latestRoute.import_id,
+    driverId: driver.id
   });
   return formatRoutesResponse(hydratedRows, driver.id);
 }
