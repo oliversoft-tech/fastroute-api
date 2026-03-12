@@ -443,6 +443,46 @@ async function resolveDriverIdFromImportId(importId) {
   return null;
 }
 
+async function resolveDriverIdFromExistingRoutesByImportId(importId) {
+  const parsedImportId = toPositiveInt(importId);
+  if (!parsedImportId) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('routes')
+    .select('driver_id')
+    .eq('import_id', parsedImportId)
+    .order('id', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new AppError(500, `Erro ao resolver motorista via rotas do import_id: ${error.message}`);
+  }
+
+  return resolveDriverIdCandidate(data?.driver_id);
+}
+
+async function resolveDriverIdFromSingleUserFallback() {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .select('id')
+    .order('id', { ascending: true })
+    .limit(2);
+
+  if (error) {
+    throw new AppError(500, `Erro ao resolver fallback de motorista: ${error.message}`);
+  }
+
+  const users = Array.isArray(data) ? data : [];
+  if (users.length !== 1) {
+    return null;
+  }
+
+  return resolveDriverIdCandidate(users[0]?.id);
+}
+
 async function enrichRoutePayload(rawPayload) {
   const payload = sanitizeRoutePayload(rawPayload);
   const rawDriverId = payload.driver_id ?? payload.user_id;
@@ -524,6 +564,24 @@ async function buildRouteCreatePayload(routePayload, mutation) {
     const driverIdFromImport = await resolveDriverIdFromImportId(importIdForDriverResolution);
     if (driverIdFromImport) {
       payload.driver_id = driverIdFromImport;
+    }
+  }
+
+  if (!toPositiveInt(payload.driver_id)) {
+    const importIdForRouteFallback =
+      toPositiveInt(payload.import_id) ??
+      toPositiveInt(mutation?.payload?.import_id) ??
+      toPositiveInt(mutation?.payload?.importId);
+    const driverIdFromExistingRoutes = await resolveDriverIdFromExistingRoutesByImportId(importIdForRouteFallback);
+    if (driverIdFromExistingRoutes) {
+      payload.driver_id = driverIdFromExistingRoutes;
+    }
+  }
+
+  if (!toPositiveInt(payload.driver_id)) {
+    const driverIdFromSingleUser = await resolveDriverIdFromSingleUserFallback();
+    if (driverIdFromSingleUser) {
+      payload.driver_id = driverIdFromSingleUser;
     }
   }
 

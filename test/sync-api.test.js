@@ -840,6 +840,76 @@ test('sync API: route CREATE resolve driver_id por user_id do import quando orde
   });
 });
 
+test('sync API: route CREATE resolve driver_id via rotas já existentes do mesmo import quando tabela de import não responde', async () => {
+  const fakeSupabase = createFakeSupabase(
+    {
+      users: [{ id: 77, auth_user_id: '77' }],
+      orders_import: [{ id: 706, user_id: 77, status: 'SEM_ROTA' }],
+      routes: [{ id: 7001, import_id: 706, driver_id: 77, cluster_id: 1, status: 'CRIADA', version: 1 }]
+    },
+    {
+      enforceConstraints: true,
+      missingTables: ['orders_import', 'imports']
+    }
+  );
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await pushOne(baseUrl, {
+      deviceId: 'device-4e',
+      mutationId: 'm-route-existing-route-driver-fallback',
+      entityType: 'route',
+      entityId: 945,
+      op: 'CREATE',
+      baseVersion: 0,
+      payload: {
+        import_id: 706,
+        status: 'CRIADA'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    const route = fakeSupabase.state.routes.find((item) => item.id === 945);
+    assert.ok(route);
+    assert.equal(route.driver_id, 77);
+  });
+});
+
+test('sync API: route CREATE resolve driver_id por fallback de usuário único quando payload/import não informam motorista', async () => {
+  const fakeSupabase = createFakeSupabase(
+    {
+      users: [{ id: 91, auth_user_id: '44444444-4444-4444-4444-444444444444' }],
+      orders_import: []
+    },
+    { enforceConstraints: true }
+  );
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await pushOne(baseUrl, {
+      deviceId: 'device-4f',
+      mutationId: 'm-route-single-user-driver-fallback',
+      entityType: 'route',
+      entityId: 946,
+      op: 'CREATE',
+      baseVersion: 0,
+      payload: {
+        import_id: 9999,
+        status: 'CRIADA'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    const route = fakeSupabase.state.routes.find((item) => item.id === 946);
+    assert.ok(route);
+    assert.equal(route.driver_id, 91);
+  });
+});
+
 test('sync API: route CREATE resolve driver_id quando import.user_id está em auth_user_id (uuid)', async () => {
   const authUserId = '22222222-2222-2222-2222-222222222222';
   const fakeSupabase = createFakeSupabase(
