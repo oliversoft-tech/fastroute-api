@@ -339,23 +339,19 @@ async function resolveDriverIdFromImportId(importId) {
   const tables = ['orders_import', 'imports'];
 
   for (const tableName of tables) {
-    let selectedColumns = ['driver_id', 'user_id'];
-
-    for (let attempt = 0; attempt < 4 && selectedColumns.length > 0; attempt += 1) {
+    for (const columnName of ['user_id', 'driver_id']) {
       const { data, error } = await supabaseAdmin
         .from(tableName)
-        .select(selectedColumns.join(','))
+        .select(columnName)
         .eq('id', parsedImportId)
         .maybeSingle();
 
       if (!error) {
-        const resolvedDriverId =
-          toPositiveInt(data?.driver_id) ??
-          toPositiveInt(data?.user_id);
+        const resolvedDriverId = toPositiveInt(data?.[columnName]);
         if (resolvedDriverId) {
           return resolvedDriverId;
         }
-        break;
+        continue;
       }
 
       if (isMissingTableError(error, tableName)) {
@@ -363,8 +359,7 @@ async function resolveDriverIdFromImportId(importId) {
       }
 
       const missingColumn = readMissingColumnName(error);
-      if (missingColumn && selectedColumns.includes(missingColumn)) {
-        selectedColumns = selectedColumns.filter((column) => column !== missingColumn);
+      if (missingColumn === columnName) {
         continue;
       }
 
