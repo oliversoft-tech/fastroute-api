@@ -399,6 +399,10 @@ async function enrichRoutePayload(rawPayload) {
 
 async function buildRouteCreatePayload(routePayload, mutation) {
   const payload = compactObject(toNormalizedObject(routePayload));
+  const routeIdForHints =
+    toPositiveInt(payload.id) ??
+    toPositiveInt(payload.route_id) ??
+    toPositiveInt(mutation?.entityId);
 
   if (!toPositiveInt(payload.import_id)) {
     const fallbackImportId =
@@ -414,6 +418,7 @@ async function buildRouteCreatePayload(routePayload, mutation) {
   if (!toPositiveInt(payload.driver_id)) {
     const fallbackDriverId =
       toPositiveInt(payload.user_id) ??
+      toPositiveInt(mutation?.context?.routeDriverHintsByRouteId?.get(routeIdForHints)) ??
       toPositiveInt(mutation?.payload?.driver_id) ??
       toPositiveInt(mutation?.payload?.driverId) ??
       toPositiveInt(mutation?.payload?.user_id) ??
@@ -647,9 +652,40 @@ async function applyMutation(m) {
 }
 
 async function push(body) {
+  const routeDriverHintsByRouteId = new Map();
+  for (const mutation of body?.mutations || []) {
+    const entityType = String(mutation?.entityType || '').toLowerCase();
+    const mutationOp = String(mutation?.op || '').toUpperCase();
+    if (entityType !== 'route_waypoint' || mutationOp !== 'CREATE') {
+      continue;
+    }
+
+    const mutationPayload = toNormalizedObject(mutation?.payload);
+    const routeId =
+      toPositiveInt(mutationPayload.route_id) ??
+      toPositiveInt(mutationPayload.routeId);
+    const driverId =
+      toPositiveInt(mutationPayload.user_id) ??
+      toPositiveInt(mutationPayload.userId) ??
+      toPositiveInt(mutationPayload.driver_id) ??
+      toPositiveInt(mutationPayload.driverId);
+
+    if (!routeId || !driverId || routeDriverHintsByRouteId.has(routeId)) {
+      continue;
+    }
+    routeDriverHintsByRouteId.set(routeId, driverId);
+  }
+
   const results = [];
   for (const m of body.mutations || []) {
-    results.push(await applyMutation(m));
+    results.push(
+      await applyMutation({
+        ...m,
+        context: {
+          routeDriverHintsByRouteId
+        }
+      })
+    );
   }
   return { ok: true, results };
 }

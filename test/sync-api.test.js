@@ -785,6 +785,58 @@ test('sync API: route CREATE resolve driver_id por user_id do import quando orde
   });
 });
 
+test('sync API: route CREATE resolve driver_id via waypoint CREATE do mesmo batch', async () => {
+  const fakeSupabase = createFakeSupabase(
+    {
+      users: [{ id: 77, auth_user_id: '77' }],
+      orders_import: [{ id: 703, user_id: 77, status: 'SEM_ROTA' }]
+    },
+    { enforceConstraints: true }
+  );
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await postJson(baseUrl, '/sync/push', {
+      mutations: [
+        {
+          deviceId: 'device-4c',
+          mutationId: 'm-route-create-hint',
+          entityType: 'route',
+          entityId: 942,
+          op: 'CREATE',
+          baseVersion: 0,
+          payload: {
+            import_id: 703,
+            status: 'CRIADA'
+          }
+        },
+        {
+          deviceId: 'device-4c',
+          mutationId: 'm-waypoint-create-hint',
+          entityType: 'route_waypoint',
+          entityId: 94201,
+          op: 'CREATE',
+          baseVersion: 0,
+          payload: {
+            route_id: 942,
+            user_id: 77,
+            seq_order: 1,
+            status: 'PENDENTE'
+          }
+        }
+      ]
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+    assert.equal(response.payload.results[1].status, 'APPLIED');
+
+    const route = fakeSupabase.state.routes.find((item) => item.id === 942);
+    assert.ok(route);
+    assert.equal(route.driver_id, 77);
+  });
+});
+
 test('sync API: route CREATE remapeia import_id inexistente criando orders_import para o motorista', async () => {
   const fakeSupabase = createFakeSupabase(
     {
