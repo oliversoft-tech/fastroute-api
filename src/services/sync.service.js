@@ -302,7 +302,22 @@ const WAYPOINT_TRANSIENT_FIELDS = new Set([
   'latitude',
   'longitude',
   'title',
-  'subtitle'
+  'subtitle',
+  'photo',
+  'file_name',
+  'fileName',
+  'filename',
+  'user_id',
+  'userId',
+  'image_uri',
+  'imageUri',
+  'photo_url',
+  'photoUrl',
+  'object_path',
+  'objectPath',
+  'bucket',
+  'file_size_bytes',
+  'fileSizeBytes'
 ]);
 
 function sanitizeWaypointPayload(rawPayload) {
@@ -366,6 +381,248 @@ async function updateWaypointWithCompatiblePayload(entityId, payload, versionFie
   }
 
   return updatePayload;
+}
+
+function basenameFromPath(pathValue) {
+  const normalized = toNonEmptyString(pathValue);
+  if (!normalized) {
+    return null;
+  }
+  const withoutQuery = normalized.split('?')[0]?.split('#')[0] ?? normalized;
+  const segments = withoutQuery.replace(/\\/g, '/').split('/').filter(Boolean);
+  if (segments.length === 0) {
+    return null;
+  }
+  return segments[segments.length - 1];
+}
+
+function buildObjectPathFromImageReference(imageReference, fallbackFileName) {
+  const normalized = toNonEmptyString(imageReference);
+  if (!normalized) {
+    return toNonEmptyString(fallbackFileName);
+  }
+
+  const withoutQuery = normalized.split('?')[0]?.split('#')[0] ?? normalized;
+  const marker = '/delivery-photos/';
+  const markerIndex = withoutQuery.lastIndexOf(marker);
+  if (markerIndex >= 0) {
+    const fromMarker = withoutQuery.slice(markerIndex + marker.length).trim();
+    if (fromMarker.length > 0) {
+      return fromMarker;
+    }
+  }
+
+  return basenameFromPath(withoutQuery) ?? toNonEmptyString(fallbackFileName);
+}
+
+function parseWaypointPhotoInput(rawPayload, entityId, fallbackRouteId) {
+  const payload = toNormalizedObject(rawPayload);
+  const photo = toNormalizedObject(payload.photo);
+
+  const fileName =
+    toNonEmptyString(photo.file_name) ??
+    toNonEmptyString(photo.filename) ??
+    toNonEmptyString(payload.file_name) ??
+    toNonEmptyString(payload.fileName);
+  const imageReference =
+    toNonEmptyString(photo.image_uri) ??
+    toNonEmptyString(photo.imageUri) ??
+    toNonEmptyString(photo.photo_url) ??
+    toNonEmptyString(photo.photoUrl) ??
+    toNonEmptyString(payload.image_uri) ??
+    toNonEmptyString(payload.imageUri) ??
+    toNonEmptyString(payload.photo_url) ??
+    toNonEmptyString(payload.photoUrl);
+  const objectPath =
+    toNonEmptyString(photo.object_path) ??
+    toNonEmptyString(photo.objectPath) ??
+    toNonEmptyString(payload.object_path) ??
+    toNonEmptyString(payload.objectPath) ??
+    buildObjectPathFromImageReference(imageReference, fileName);
+  const finalFileName = fileName ?? basenameFromPath(objectPath);
+
+  const fileSizeBytes =
+    toNonNegativeInt(photo.file_size_bytes ?? photo.fileSizeBytes) ??
+    toNonNegativeInt(payload.file_size_bytes ?? payload.fileSizeBytes);
+  const routeId =
+    toPositiveInt(photo.route_id ?? photo.routeId) ??
+    toPositiveInt(payload.route_id ?? payload.routeId) ??
+    toPositiveInt(fallbackRouteId);
+  const userCandidate =
+    photo.user_id ??
+    photo.userId ??
+    payload.user_id ??
+    payload.userId ??
+    payload.driver_id ??
+    payload.driverId ??
+    payload.auth_user_id ??
+    payload.authUserId;
+  const bucket =
+    toNonEmptyString(photo.bucket) ??
+    toNonEmptyString(payload.bucket) ??
+    process.env.WAYPOINT_PHOTOS_BUCKET ??
+    'delivery-photos';
+
+  const hasAnyPhotoField =
+    Object.keys(photo).length > 0 ||
+    Boolean(fileName) ||
+    Boolean(imageReference) ||
+    Boolean(objectPath) ||
+    fileSizeBytes !== null;
+
+  if (!hasAnyPhotoField) {
+    return null;
+  }
+
+  return {
+    waypointId: toPositiveInt(photo.waypoint_id ?? photo.waypointId) ?? toPositiveInt(entityId) ?? null,
+    routeId,
+    userCandidate,
+    fileName: finalFileName,
+    objectPath,
+    fileSizeBytes,
+    bucket
+  };
+}
+
+async function insertWaypointPhotoWithCompatiblePayload(rawPayload) {
+  const payload = compactObject(toNormalizedObject(rawPayload));
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const { error } = await supabaseAdmin.from('waypoint_delivery_photo').insert(payload);
+    if (!error) {
+      return payload;
+    }
+
+    const missingColumn = readMissingColumnName(error);
+    if (!missingColumn || !Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
+      throw error;
+    }
+
+    delete payload[missingColumn];
+    lastError = error;
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return payload;
+}
+
+async function updateWaypointPhotoWithCompatiblePayload(waypointId, rawPayload) {
+  const payload = compactObject(toNormalizedObject(rawPayload));
+  delete payload.waypoint_id;
+
+  if (Object.keys(payload).length === 0) {
+    return payload;
+  }
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const { error } = await supabaseAdmin
+      .from('waypoint_delivery_photo')
+      .update(payload)
+      .eq('waypoint_id', waypointId);
+
+    if (!error) {
+      return payload;
+    }
+
+    const missingColumn = readMissingColumnName(error);
+    if (!missingColumn || !Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
+      throw error;
+    }
+
+    delete payload[missingColumn];
+    lastError = error;
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return payload;
+}
+
+async function resolveWaypointPhotoUserId(photoInput, mutation) {
+  const routeId = toPositiveInt(photoInput?.routeId);
+  const payload = toNormalizedObject(mutation?.payload);
+  const candidates = [
+    photoInput?.userCandidate,
+    routeId ? mutation?.context?.routeDriverHintsByRouteId?.get(routeId) : null,
+    mutation?.context?.deviceDriverIdHint,
+    payload.user_id,
+    payload.userId,
+    payload.driver_id,
+    payload.driverId,
+    payload.auth_user_id,
+    payload.authUserId,
+    mutation?.context?.authUserIdHint
+  ];
+
+  for (const candidate of candidates) {
+    const resolved = await resolveDriverIdCandidate(candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+async function persistWaypointDeliveryPhotoFromSyncMutation(mutation, currentWaypoint) {
+  const photoInput = parseWaypointPhotoInput(mutation?.payload, mutation?.entityId, currentWaypoint?.route_id);
+  if (!photoInput) {
+    return false;
+  }
+
+  const waypointId = toPositiveInt(photoInput.waypointId ?? mutation?.entityId);
+  if (!waypointId) {
+    throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: waypoint_id ausente.');
+  }
+  if (!toPositiveInt(photoInput.routeId)) {
+    throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: route_id ausente.');
+  }
+  if (!toNonEmptyString(photoInput.fileName)) {
+    throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: file_name ausente.');
+  }
+  if (!toNonEmptyString(photoInput.objectPath)) {
+    throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: object_path ausente.');
+  }
+
+  const resolvedUserId = await resolveWaypointPhotoUserId(photoInput, mutation);
+  if (!resolvedUserId) {
+    throw new AppError(400, 'Payload de waypoint com foto incompleto para sync: user_id ausente.');
+  }
+
+  const normalizedPhotoPayload = compactObject({
+    waypoint_id: waypointId,
+    route_id: toPositiveInt(photoInput.routeId),
+    user_id: resolvedUserId,
+    bucket: toNonEmptyString(photoInput.bucket) ?? 'delivery-photos',
+    object_path: toNonEmptyString(photoInput.objectPath),
+    file_name: toNonEmptyString(photoInput.fileName),
+    file_size_bytes: toNonNegativeInt(photoInput.fileSizeBytes)
+  });
+
+  const { data: existing, error: selectPhotoError } = await supabaseAdmin
+    .from('waypoint_delivery_photo')
+    .select('waypoint_id')
+    .eq('waypoint_id', waypointId)
+    .maybeSingle();
+  if (selectPhotoError) {
+    throw selectPhotoError;
+  }
+
+  if (existing) {
+    await updateWaypointPhotoWithCompatiblePayload(waypointId, normalizedPhotoPayload);
+  } else {
+    await insertWaypointPhotoWithCompatiblePayload(normalizedPhotoPayload);
+  }
+
+  return true;
 }
 
 async function resolveDriverIdFromAuthUserId(authUserId) {
@@ -763,6 +1020,15 @@ async function applyMutation(m) {
         throw new AppError(500, `Erro ao criar waypoint via sync: ${insertWaypointError.message}`);
       }
 
+      try {
+        await persistWaypointDeliveryPhotoFromSyncMutation(m, {
+          id: m.entityId,
+          route_id: waypointPayload.route_id
+        });
+      } catch (photoPersistError) {
+        throw new AppError(500, `Erro ao persistir foto de waypoint via sync: ${photoPersistError.message}`);
+      }
+
       await logChange('route_waypoint', m.entityId, m.op, 1, waypointChangePayload);
 
       await markApplied(m.deviceId, m.mutationId);
@@ -785,6 +1051,12 @@ async function applyMutation(m) {
       await updateWaypointWithCompatiblePayload(m.entityId, waypointPayload, versionField, nextVersion);
     } catch (updateWaypointError) {
       throw new AppError(500, `Erro ao atualizar waypoint via sync: ${updateWaypointError.message}`);
+    }
+
+    try {
+      await persistWaypointDeliveryPhotoFromSyncMutation(m, wp);
+    } catch (photoPersistError) {
+      throw new AppError(500, `Erro ao persistir foto de waypoint via sync: ${photoPersistError.message}`);
     }
 
     await logChange('route_waypoint', wp.id, m.op, nextVersion, waypointChangePayload);

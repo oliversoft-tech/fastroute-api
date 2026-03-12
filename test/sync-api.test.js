@@ -1301,6 +1301,108 @@ test('sync API: route_waypoint UPDATE remove colunas faltantes do schema por ten
   });
 });
 
+test('sync API: route_waypoint UPDATE persiste foto em waypoint_delivery_photo quando payload inclui metadados', async () => {
+  const fakeSupabase = createFakeSupabase({
+    route_waypoints: [{ id: 9951, route_id: 995, seq_order: 1, status: 'PENDENTE', version: 1 }],
+    routes: [{ id: 995, import_id: 700, driver_id: 77, cluster_id: 1, status: 'EM_ANDAMENTO', version: 1 }],
+    orders_import: [{ id: 700, user_id: 77, status: 'SEM_ROTA' }],
+    users: [{ id: 77, auth_user_id: '77' }]
+  });
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await pushOne(baseUrl, {
+      deviceId: 'device-11b',
+      mutationId: 'm-waypoint-update-photo-persist',
+      entityType: 'route_waypoint',
+      entityId: 9951,
+      op: 'UPDATE',
+      baseVersion: 1,
+      payload: {
+        route_id: 995,
+        status: 'CONCLUIDO',
+        file_name: 'photo_9951.jpg',
+        user_id: 77,
+        image_uri: 'file:///var/mobile/Containers/Data/Application/XYZ/Documents/delivery-photos/photo_9951.jpg',
+        file_size_bytes: 123456
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    const photoRows = fakeSupabase.state.waypoint_delivery_photo || [];
+    assert.equal(photoRows.length, 1);
+    assert.deepEqual(photoRows[0], {
+      id: 1,
+      waypoint_id: 9951,
+      route_id: 995,
+      user_id: 77,
+      bucket: 'delivery-photos',
+      object_path: 'photo_9951.jpg',
+      file_name: 'photo_9951.jpg',
+      file_size_bytes: 123456
+    });
+  });
+});
+
+test('sync API: route_waypoint UPDATE atualiza foto existente sem duplicar waypoint_delivery_photo', async () => {
+  const fakeSupabase = createFakeSupabase({
+    route_waypoints: [{ id: 9961, route_id: 996, seq_order: 1, status: 'PENDENTE', version: 3 }],
+    routes: [{ id: 996, import_id: 700, driver_id: 77, cluster_id: 1, status: 'EM_ANDAMENTO', version: 1 }],
+    orders_import: [{ id: 700, user_id: 77, status: 'SEM_ROTA' }],
+    users: [{ id: 77, auth_user_id: '77' }],
+    waypoint_delivery_photo: [
+      {
+        id: 10,
+        waypoint_id: 9961,
+        route_id: 996,
+        user_id: 77,
+        bucket: 'delivery-photos',
+        object_path: 'old_photo.jpg',
+        file_name: 'old_photo.jpg',
+        file_size_bytes: 111
+      }
+    ]
+  });
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await pushOne(baseUrl, {
+      deviceId: 'device-11c',
+      mutationId: 'm-waypoint-update-photo-overwrite',
+      entityType: 'route_waypoint',
+      entityId: 9961,
+      op: 'UPDATE',
+      baseVersion: 3,
+      payload: {
+        route_id: 996,
+        status: 'CONCLUIDO',
+        file_name: 'new_photo.jpg',
+        user_id: 77,
+        object_path: 'delivery/new_photo.jpg',
+        file_size_bytes: 222
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    const photoRows = fakeSupabase.state.waypoint_delivery_photo || [];
+    assert.equal(photoRows.length, 1);
+    assert.deepEqual(photoRows[0], {
+      id: 10,
+      waypoint_id: 9961,
+      route_id: 996,
+      user_id: 77,
+      bucket: 'delivery-photos',
+      object_path: 'delivery/new_photo.jpg',
+      file_name: 'new_photo.jpg',
+      file_size_bytes: 222
+    });
+  });
+});
+
 test('sync API: route_waypoint CREATE falha quando status obrigatório está ausente', async () => {
   const fakeSupabase = createFakeSupabase(
     {
