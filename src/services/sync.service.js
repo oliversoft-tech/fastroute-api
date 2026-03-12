@@ -311,6 +311,42 @@ async function resolveDriverIdFromAuthUserId(authUserId) {
   return toPositiveInt(data?.id);
 }
 
+async function resolveDriverIdFromImportId(importId) {
+  const parsedImportId = toPositiveInt(importId);
+  if (!parsedImportId) {
+    return null;
+  }
+
+  const lookups = [
+    { table: 'orders_import', columns: 'user_id,driver_id' },
+    { table: 'imports', columns: 'user_id,driver_id' }
+  ];
+
+  for (const lookup of lookups) {
+    const { data, error } = await supabaseAdmin
+      .from(lookup.table)
+      .select(lookup.columns)
+      .eq('id', parsedImportId)
+      .maybeSingle();
+
+    if (error) {
+      if (isMissingTableError(error, lookup.table)) {
+        continue;
+      }
+      throw new AppError(500, `Erro ao resolver motorista via import_id: ${error.message}`);
+    }
+
+    const resolvedDriverId =
+      toPositiveInt(data?.driver_id) ??
+      toPositiveInt(data?.user_id);
+    if (resolvedDriverId) {
+      return resolvedDriverId;
+    }
+  }
+
+  return null;
+}
+
 async function enrichRoutePayload(rawPayload) {
   const payload = sanitizeRoutePayload(rawPayload);
   const rawDriverId = payload.driver_id ?? payload.user_id;
@@ -338,7 +374,7 @@ async function enrichRoutePayload(rawPayload) {
   return compactObject(payload);
 }
 
-function buildRouteCreatePayload(routePayload, mutation) {
+async function buildRouteCreatePayload(routePayload, mutation) {
   const payload = compactObject(toNormalizedObject(routePayload));
 
   if (!toPositiveInt(payload.import_id)) {
@@ -364,6 +400,17 @@ function buildRouteCreatePayload(routePayload, mutation) {
 
     if (fallbackDriverId) {
       payload.driver_id = fallbackDriverId;
+    }
+  }
+
+  if (!toPositiveInt(payload.driver_id)) {
+    const importIdForDriverResolution =
+      toPositiveInt(payload.import_id) ??
+      toPositiveInt(mutation?.payload?.import_id) ??
+      toPositiveInt(mutation?.payload?.importId);
+    const driverIdFromImport = await resolveDriverIdFromImportId(importIdForDriverResolution);
+    if (driverIdFromImport) {
+      payload.driver_id = driverIdFromImport;
     }
   }
 
@@ -479,7 +526,7 @@ async function applyMutation(m) {
     }
 
     if (!route) {
-      const routeCreatePayload = buildRouteCreatePayload(routePayload, m);
+      const routeCreatePayload = await buildRouteCreatePayload(routePayload, m);
       const ensuredImportId = await ensureRouteImportId(routeCreatePayload, m);
       if (ensuredImportId) {
         routeCreatePayload.import_id = ensuredImportId;

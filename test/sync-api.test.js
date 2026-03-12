@@ -647,7 +647,7 @@ test('sync API: push/pull cobre operações principais + duplicate/conflict/not_
   });
 });
 
-test('sync API: route CREATE define campos obrigatórios/defaults do modelo', async () => {
+test('sync API: route CREATE define campos obrigatórios/defaults do modelo resolvendo driver por import_id', async () => {
   const fakeSupabase = createFakeSupabase(
     {
       users: [{ id: 77, auth_user_id: '77' }],
@@ -666,8 +666,7 @@ test('sync API: route CREATE define campos obrigatórios/defaults do modelo', as
       op: 'CREATE',
       baseVersion: 0,
       payload: {
-        import_id: 700,
-        auth_user_id: '77'
+        import_id: 700
       }
     });
 
@@ -687,9 +686,7 @@ test('sync API: route CREATE define campos obrigatórios/defaults do modelo', as
 });
 
 test('sync API: route CREATE falha com 400 quando driver_id não pode ser resolvido', async () => {
-  const fakeSupabase = createFakeSupabase({
-    orders_import: [{ id: 700, user_id: 77, status: 'SEM_ROTA' }]
-  });
+  const fakeSupabase = createFakeSupabase();
 
   const app = loadSyncAppWithSupabase(fakeSupabase);
   await withServer(app, async (baseUrl) => {
