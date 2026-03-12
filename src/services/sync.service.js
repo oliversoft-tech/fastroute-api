@@ -33,6 +33,57 @@ function toNonEmptyString(value) {
   return normalized;
 }
 
+function decodeBase64UrlToUtf8(value) {
+  const normalized = toNonEmptyString(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const base64 = normalized.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+  try {
+    return Buffer.from(padded, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+function readAuthUserIdFromAuthorizationHeader(headerValue) {
+  const rawHeader = toNonEmptyString(headerValue);
+  if (!rawHeader) {
+    return null;
+  }
+
+  const bearerPrefix = /^bearer\s+/i;
+  const token = rawHeader.replace(bearerPrefix, '').trim();
+  if (!token) {
+    return null;
+  }
+
+  const parts = token.split('.');
+  if (parts.length < 2) {
+    return null;
+  }
+
+  const payloadRaw = decodeBase64UrlToUtf8(parts[1]);
+  if (!payloadRaw) {
+    return null;
+  }
+
+  try {
+    const payload = toNormalizedObject(JSON.parse(payloadRaw));
+    return (
+      toNonEmptyString(payload.sub) ??
+      toNonEmptyString(payload.auth_user_id) ??
+      toNonEmptyString(payload.authUserId) ??
+      toNonEmptyString(payload.user_id) ??
+      toNonEmptyString(payload.userId)
+    );
+  } catch {
+    return null;
+  }
+}
+
 function isMissingColumnError(error, columnName) {
   const message = String(error?.message || '').toLowerCase();
   return message.includes('column') && message.includes(columnName.toLowerCase()) && message.includes('does not exist');
@@ -441,12 +492,14 @@ async function buildRouteCreatePayload(routePayload, mutation) {
     const driverCandidates = [
       payload.user_id,
       mutation?.context?.routeDriverHintsByRouteId?.get(routeIdForHints),
+      mutation?.context?.deviceDriverIdHint,
       mutation?.payload?.driver_id,
       mutation?.payload?.driverId,
       mutation?.payload?.user_id,
       mutation?.payload?.userId,
       mutation?.payload?.auth_user_id,
-      mutation?.payload?.authUserId
+      mutation?.payload?.authUserId,
+      mutation?.context?.authUserIdHint
     ];
 
     let fallbackDriverId = null;
@@ -683,38 +736,66 @@ async function applyMutation(m) {
   return { mutationId: m.mutationId, status: 'APPLIED' };
 }
 
-async function push(body) {
+async function push(body, options = {}) {
+  const authUserIdHint =
+    toNonEmptyString(options?.authUserIdHint) ??
+    readAuthUserIdFromAuthorizationHeader(options?.authorizationHeader);
+
+  const driverIdCandidateCache = new Map();
+  const resolveDriverIdCandidateCached = async (candidate) => {
+    const cacheKey = JSON.stringify(candidate ?? null);
+    if (driverIdCandidateCache.has(cacheKey)) {
+      return driverIdCandidateCache.get(cacheKey);
+    }
+
+    const resolved = await resolveDriverIdCandidate(candidate);
+    driverIdCandidateCache.set(cacheKey, resolved);
+    return resolved;
+  };
+
+  const authHeaderDriverIdHint = await resolveDriverIdCandidateCached(authUserIdHint);
   const routeDriverHintsByRouteId = new Map();
+  const deviceDriverHintsByDeviceId = new Map();
   for (const mutation of body?.mutations || []) {
+    const mutationPayload = toNormalizedObject(mutation?.payload);
     const entityType = String(mutation?.entityType || '').toLowerCase();
     const mutationOp = String(mutation?.op || '').toUpperCase();
+    const deviceId = toNonEmptyString(mutation?.deviceId);
+    let mutationDriverId =
+      (await resolveDriverIdCandidateCached(mutationPayload.user_id)) ??
+      (await resolveDriverIdCandidateCached(mutationPayload.userId)) ??
+      (await resolveDriverIdCandidateCached(mutationPayload.driver_id)) ??
+      (await resolveDriverIdCandidateCached(mutationPayload.driverId)) ??
+      (await resolveDriverIdCandidateCached(mutationPayload.auth_user_id)) ??
+      (await resolveDriverIdCandidateCached(mutationPayload.authUserId)) ??
+      authHeaderDriverIdHint;
+
+    if (deviceId && mutationDriverId && !deviceDriverHintsByDeviceId.has(deviceId)) {
+      deviceDriverHintsByDeviceId.set(deviceId, mutationDriverId);
+    }
+
     if (entityType !== 'route_waypoint' || mutationOp !== 'CREATE') {
       continue;
     }
 
-    const mutationPayload = toNormalizedObject(mutation?.payload);
-    const routeId =
-      toPositiveInt(mutationPayload.route_id) ??
-      toPositiveInt(mutationPayload.routeId);
-    const driverId =
-      toPositiveInt(mutationPayload.user_id) ??
-      toPositiveInt(mutationPayload.userId) ??
-      toPositiveInt(mutationPayload.driver_id) ??
-      toPositiveInt(mutationPayload.driverId);
-
-    if (!routeId || !driverId || routeDriverHintsByRouteId.has(routeId)) {
+    const routeId = toPositiveInt(mutationPayload.route_id) ?? toPositiveInt(mutationPayload.routeId);
+    if (!routeId || !mutationDriverId || routeDriverHintsByRouteId.has(routeId)) {
       continue;
     }
-    routeDriverHintsByRouteId.set(routeId, driverId);
+    routeDriverHintsByRouteId.set(routeId, mutationDriverId);
   }
 
   const results = [];
-  for (const m of body.mutations || []) {
+  for (const m of body?.mutations || []) {
+    const deviceId = toNonEmptyString(m?.deviceId);
+    const deviceDriverIdHint = deviceId ? (deviceDriverHintsByDeviceId.get(deviceId) ?? null) : null;
     results.push(
       await applyMutation({
         ...m,
         context: {
-          routeDriverHintsByRouteId
+          routeDriverHintsByRouteId,
+          deviceDriverIdHint,
+          authUserIdHint
         }
       })
     );

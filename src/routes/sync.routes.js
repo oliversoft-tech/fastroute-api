@@ -4,7 +4,9 @@ const syncService = require('../services/sync.service');
 
 router.post('/push', async (req, res, next) => {
   try {
-    const result = await syncService.push(req.body);
+    const result = await syncService.push(req.body, {
+      authorizationHeader: req.headers?.authorization
+    });
     res.json(result);
   } catch (e) {
     next(e);

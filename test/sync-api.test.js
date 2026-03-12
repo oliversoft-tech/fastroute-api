@@ -465,10 +465,10 @@ async function withServer(app, fn) {
   }
 }
 
-async function postJson(baseUrl, path, body) {
+async function postJson(baseUrl, path, body, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
     body: JSON.stringify(body)
   });
 
@@ -478,6 +478,11 @@ async function postJson(baseUrl, path, body) {
 
 async function pushOne(baseUrl, mutation) {
   return postJson(baseUrl, '/sync/push', { mutations: [mutation] });
+}
+
+function buildUnsignedJwt(payload) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.`;
 }
 
 test('sync API: push/pull cobre operações principais + duplicate/conflict/not_found', async () => {
@@ -741,6 +746,56 @@ test('sync API: route CREATE resolve driver_id pelo auth_user_id uuid em users',
     const route = fakeSupabase.state.routes.find((item) => item.id === 940);
     assert.ok(route);
     assert.equal(route.driver_id, 88);
+  });
+});
+
+test('sync API: route CREATE resolve driver_id pelo JWT Authorization quando payload não contém usuário', async () => {
+  const authUserId = '33333333-3333-3333-3333-333333333333';
+  const fakeSupabase = createFakeSupabase(
+    {
+      users: [{ id: 89, auth_user_id: authUserId }],
+      orders_import: []
+    },
+    { enforceConstraints: true }
+  );
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const token = buildUnsignedJwt({ sub: authUserId });
+    const response = await postJson(
+      baseUrl,
+      '/sync/push',
+      {
+        mutations: [
+          {
+            deviceId: 'device-4jwt',
+            mutationId: 'm-route-auth-header-fallback',
+            entityType: 'route',
+            entityId: 944,
+            op: 'CREATE',
+            baseVersion: 0,
+            payload: {
+              import_id: 705,
+              status: 'CRIADA'
+            }
+          }
+        ]
+      },
+      {
+        headers: {
+          authorization: `Bearer ${token}`
+        }
+      }
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    const route = fakeSupabase.state.routes.find((item) => item.id === 944);
+    assert.ok(route);
+    assert.equal(route.driver_id, 89);
+    assert.equal(fakeSupabase.state.orders_import.length, 1);
+    assert.equal(fakeSupabase.state.orders_import[0].user_id, 89);
   });
 });
 
