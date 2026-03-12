@@ -785,6 +785,40 @@ test('sync API: route CREATE resolve driver_id por user_id do import quando orde
   });
 });
 
+test('sync API: route CREATE resolve driver_id quando import.user_id está em auth_user_id (uuid)', async () => {
+  const authUserId = '22222222-2222-2222-2222-222222222222';
+  const fakeSupabase = createFakeSupabase(
+    {
+      users: [{ id: 79, auth_user_id: authUserId }],
+      orders_import: [{ id: 704, user_id: authUserId, status: 'SEM_ROTA' }]
+    },
+    { enforceConstraints: true }
+  );
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await pushOne(baseUrl, {
+      deviceId: 'device-4d',
+      mutationId: 'm-route-import-auth-user-fallback',
+      entityType: 'route',
+      entityId: 943,
+      op: 'CREATE',
+      baseVersion: 0,
+      payload: {
+        import_id: 704,
+        status: 'CRIADA'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    const route = fakeSupabase.state.routes.find((item) => item.id === 943);
+    assert.ok(route);
+    assert.equal(route.driver_id, 79);
+  });
+});
+
 test('sync API: route CREATE resolve driver_id via waypoint CREATE do mesmo batch', async () => {
   const fakeSupabase = createFakeSupabase(
     {

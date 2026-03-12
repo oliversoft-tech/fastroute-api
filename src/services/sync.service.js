@@ -25,6 +25,14 @@ function toNonNegativeInt(value) {
   return parsed;
 }
 
+function toNonEmptyString(value) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return null;
+  }
+  return normalized;
+}
+
 function isMissingColumnError(error, columnName) {
   const message = String(error?.message || '').toLowerCase();
   return message.includes('column') && message.includes(columnName.toLowerCase()) && message.includes('does not exist');
@@ -330,6 +338,20 @@ async function resolveDriverIdFromAuthUserId(authUserId) {
   return toPositiveInt(data?.id);
 }
 
+async function resolveDriverIdCandidate(value) {
+  const directDriverId = toPositiveInt(value);
+  if (directDriverId) {
+    return directDriverId;
+  }
+
+  const candidate = toNonEmptyString(value);
+  if (!candidate) {
+    return null;
+  }
+
+  return resolveDriverIdFromAuthUserId(candidate);
+}
+
 async function resolveDriverIdFromImportId(importId) {
   const parsedImportId = toPositiveInt(importId);
   if (!parsedImportId) {
@@ -339,7 +361,7 @@ async function resolveDriverIdFromImportId(importId) {
   const tables = ['orders_import', 'imports'];
 
   for (const tableName of tables) {
-    for (const columnName of ['user_id', 'driver_id']) {
+    for (const columnName of ['user_id', 'driver_id', 'auth_user_id', 'authUserId']) {
       const { data, error } = await supabaseAdmin
         .from(tableName)
         .select(columnName)
@@ -347,7 +369,7 @@ async function resolveDriverIdFromImportId(importId) {
         .maybeSingle();
 
       if (!error) {
-        const resolvedDriverId = toPositiveInt(data?.[columnName]);
+        const resolvedDriverId = await resolveDriverIdCandidate(data?.[columnName]);
         if (resolvedDriverId) {
           return resolvedDriverId;
         }
@@ -416,15 +438,25 @@ async function buildRouteCreatePayload(routePayload, mutation) {
   }
 
   if (!toPositiveInt(payload.driver_id)) {
-    const fallbackDriverId =
-      toPositiveInt(payload.user_id) ??
-      toPositiveInt(mutation?.context?.routeDriverHintsByRouteId?.get(routeIdForHints)) ??
-      toPositiveInt(mutation?.payload?.driver_id) ??
-      toPositiveInt(mutation?.payload?.driverId) ??
-      toPositiveInt(mutation?.payload?.user_id) ??
-      toPositiveInt(mutation?.payload?.userId) ??
-      toPositiveInt(mutation?.payload?.auth_user_id) ??
-      toPositiveInt(mutation?.payload?.authUserId);
+    const driverCandidates = [
+      payload.user_id,
+      mutation?.context?.routeDriverHintsByRouteId?.get(routeIdForHints),
+      mutation?.payload?.driver_id,
+      mutation?.payload?.driverId,
+      mutation?.payload?.user_id,
+      mutation?.payload?.userId,
+      mutation?.payload?.auth_user_id,
+      mutation?.payload?.authUserId
+    ];
+
+    let fallbackDriverId = null;
+    for (const candidate of driverCandidates) {
+      // Aceita ids numéricos e também auth_user_id (uuid/string) como fallback.
+      fallbackDriverId = await resolveDriverIdCandidate(candidate);
+      if (fallbackDriverId) {
+        break;
+      }
+    }
 
     if (fallbackDriverId) {
       payload.driver_id = fallbackDriverId;
