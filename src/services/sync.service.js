@@ -31,14 +31,33 @@ function isMissingColumnError(error, columnName) {
 }
 
 function readMissingColumnName(error) {
+  const normalizeColumn = (value) => {
+    const normalized = String(value || '')
+      .trim()
+      .replace(/["']/g, '');
+    if (!normalized) {
+      return null;
+    }
+    const parts = normalized.split('.').filter(Boolean);
+    return parts[parts.length - 1] || null;
+  };
+
   const message = String(error?.message || '');
   const schemaCacheMatch = message.match(/Could not find the '([^']+)' column/i);
   if (schemaCacheMatch && schemaCacheMatch[1]) {
-    return schemaCacheMatch[1];
+    return normalizeColumn(schemaCacheMatch[1]);
   }
   const postgresMatch = message.match(/column "([^"]+)" does not exist/i);
   if (postgresMatch && postgresMatch[1]) {
-    return postgresMatch[1];
+    return normalizeColumn(postgresMatch[1]);
+  }
+  const postgresUnquotedMatch = message.match(/column\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s+does not exist/i);
+  if (postgresUnquotedMatch && postgresUnquotedMatch[1]) {
+    return normalizeColumn(postgresUnquotedMatch[1]);
+  }
+  const qualifiedUnquotedMatch = message.match(/\b([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\s+does not exist/i);
+  if (qualifiedUnquotedMatch && qualifiedUnquotedMatch[2]) {
+    return normalizeColumn(qualifiedUnquotedMatch[2]);
   }
   return null;
 }
@@ -317,30 +336,39 @@ async function resolveDriverIdFromImportId(importId) {
     return null;
   }
 
-  const lookups = [
-    { table: 'orders_import', columns: 'user_id,driver_id' },
-    { table: 'imports', columns: 'user_id,driver_id' }
-  ];
+  const tables = ['orders_import', 'imports'];
 
-  for (const lookup of lookups) {
-    const { data, error } = await supabaseAdmin
-      .from(lookup.table)
-      .select(lookup.columns)
-      .eq('id', parsedImportId)
-      .maybeSingle();
+  for (const tableName of tables) {
+    let selectedColumns = ['driver_id', 'user_id'];
 
-    if (error) {
-      if (isMissingTableError(error, lookup.table)) {
+    for (let attempt = 0; attempt < 4 && selectedColumns.length > 0; attempt += 1) {
+      const { data, error } = await supabaseAdmin
+        .from(tableName)
+        .select(selectedColumns.join(','))
+        .eq('id', parsedImportId)
+        .maybeSingle();
+
+      if (!error) {
+        const resolvedDriverId =
+          toPositiveInt(data?.driver_id) ??
+          toPositiveInt(data?.user_id);
+        if (resolvedDriverId) {
+          return resolvedDriverId;
+        }
+        break;
+      }
+
+      if (isMissingTableError(error, tableName)) {
+        break;
+      }
+
+      const missingColumn = readMissingColumnName(error);
+      if (missingColumn && selectedColumns.includes(missingColumn)) {
+        selectedColumns = selectedColumns.filter((column) => column !== missingColumn);
         continue;
       }
-      throw new AppError(500, `Erro ao resolver motorista via import_id: ${error.message}`);
-    }
 
-    const resolvedDriverId =
-      toPositiveInt(data?.driver_id) ??
-      toPositiveInt(data?.user_id);
-    if (resolvedDriverId) {
-      return resolvedDriverId;
+      throw new AppError(500, `Erro ao resolver motorista via import_id: ${error.message}`);
     }
   }
 

@@ -744,6 +744,47 @@ test('sync API: route CREATE resolve driver_id pelo auth_user_id uuid em users',
   });
 });
 
+test('sync API: route CREATE resolve driver_id por user_id do import quando orders_import.driver_id não existe', async () => {
+  const fakeSupabase = createFakeSupabase(
+    {
+      users: [{ id: 77, auth_user_id: '11111111-1111-1111-1111-111111111111' }],
+      orders_import: [{ id: 702, user_id: 77, status: 'SEM_ROTA' }]
+    },
+    {
+      enforceConstraints: true,
+      onSelect: ({ tableName, selectedColumns }) => {
+        if (tableName === 'orders_import' && String(selectedColumns).includes('driver_id')) {
+          return 'orders_import.driver_id does not exist';
+        }
+        return null;
+      }
+    }
+  );
+
+  const app = loadSyncAppWithSupabase(fakeSupabase);
+  await withServer(app, async (baseUrl) => {
+    const response = await pushOne(baseUrl, {
+      deviceId: 'device-4b',
+      mutationId: 'm-route-import-user-fallback',
+      entityType: 'route',
+      entityId: 941,
+      op: 'CREATE',
+      baseVersion: 0,
+      payload: {
+        import_id: 702,
+        status: 'CRIADA'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.results[0].status, 'APPLIED');
+
+    const route = fakeSupabase.state.routes.find((item) => item.id === 941);
+    assert.ok(route);
+    assert.equal(route.driver_id, 77);
+  });
+});
+
 test('sync API: route CREATE remapeia import_id inexistente criando orders_import para o motorista', async () => {
   const fakeSupabase = createFakeSupabase(
     {
