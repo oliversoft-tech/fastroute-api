@@ -1,5 +1,5 @@
 'use strict';
-const { supabaseAdmin } = require('../lib/supabase');
+const { supabaseAdmin, serviceKeyDiagnostics } = require('../lib/supabase');
 const { AppError } = require('../lib/appError');
 
 function toNormalizedObject(value) {
@@ -629,6 +629,16 @@ async function uploadWaypointPhotoFromSync(photoInput) {
   });
 
   if (error) {
+    if (isRlsPolicyError(error)) {
+      const keyRole = toNonEmptyString(serviceKeyDiagnostics?.role);
+      const roleHint = keyRole
+        ? ` role da chave atual: ${keyRole}.`
+        : '';
+      throw new AppError(
+        500,
+        `Erro no upload da foto via sync: bloqueio de policy no Storage (bucket="${bucket}", object_path="${objectPath}"). Verifique policies do Storage e SUPABASE_SERVICE_ROLE_KEY.${roleHint}`
+      );
+    }
     throw new AppError(500, `Erro no upload da foto via sync: ${error.message}`);
   }
 
