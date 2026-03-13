@@ -406,6 +406,62 @@ function basenameFromPath(pathValue) {
   return segments[segments.length - 1];
 }
 
+function sanitizeFileName(fileName, fallbackValue) {
+  const raw = toNonEmptyString(fileName) ?? toNonEmptyString(fallbackValue);
+  if (!raw) {
+    return null;
+  }
+
+  const baseName = basenameFromPath(raw) ?? raw;
+  const sanitized = String(baseName)
+    .trim()
+    .replace(/[^\w.-]+/g, '_')
+    .replace(/^_+/, '')
+    .replace(/_+$/, '');
+
+  return sanitized || null;
+}
+
+function isCanonicalWaypointPhotoPath(objectPath, routeId, waypointId) {
+  const normalizedPath = toNonEmptyString(objectPath);
+  const parsedRouteId = toPositiveInt(routeId);
+  const parsedWaypointId = toPositiveInt(waypointId);
+  if (!normalizedPath || !parsedRouteId || !parsedWaypointId) {
+    return false;
+  }
+
+  const parts = normalizedPath
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (parts.length < 3) {
+    return false;
+  }
+
+  return parts[0] === String(parsedRouteId) && parts[1] === String(parsedWaypointId);
+}
+
+function buildCanonicalWaypointPhotoObjectPath(routeId, waypointId, preferredObjectPath, preferredFileName) {
+  const parsedRouteId = toPositiveInt(routeId);
+  const parsedWaypointId = toPositiveInt(waypointId);
+  const normalizedPreferredPath = toNonEmptyString(preferredObjectPath);
+  const normalizedFileName =
+    sanitizeFileName(preferredFileName, normalizedPreferredPath) ??
+    (parsedWaypointId ? `photo_${parsedWaypointId}.jpg` : null);
+
+  if (isCanonicalWaypointPhotoPath(normalizedPreferredPath, parsedRouteId, parsedWaypointId)) {
+    return normalizedPreferredPath;
+  }
+
+  if (parsedRouteId && parsedWaypointId && normalizedFileName) {
+    return `${parsedRouteId}/${parsedWaypointId}/${normalizedFileName}`;
+  }
+
+  return normalizedPreferredPath ?? normalizedFileName;
+}
+
 function buildObjectPathFromImageReference(imageReference, fallbackFileName) {
   const normalized = toNonEmptyString(imageReference);
   if (!normalized) {
@@ -459,6 +515,10 @@ function parseWaypointPhotoInput(rawPayload, entityId, fallbackRouteId) {
     toNonEmptyString(payload.object_path) ??
     toNonEmptyString(payload.objectPath);
   const objectPathFromReference = buildObjectPathFromImageReference(imageReference, fileName);
+  const waypointId =
+    toPositiveInt(photo.waypoint_id ?? photo.waypointId) ??
+    toPositiveInt(entityId) ??
+    null;
 
   const fileSizeBytes =
     toNonNegativeInt(photo.file_size_bytes ?? photo.fileSizeBytes) ??
@@ -496,11 +556,16 @@ function parseWaypointPhotoInput(rawPayload, entityId, fallbackRouteId) {
   }
 
   const fallbackFileName = fileName ?? (toPositiveInt(entityId) ? `photo_${toPositiveInt(entityId)}.jpg` : null);
-  const objectPath = objectPathFromPayload ?? objectPathFromReference ?? fallbackFileName;
-  const finalFileName = fileName ?? basenameFromPath(objectPath) ?? fallbackFileName;
+  const objectPath = buildCanonicalWaypointPhotoObjectPath(
+    routeId,
+    waypointId,
+    objectPathFromPayload ?? objectPathFromReference,
+    fileName ?? fallbackFileName
+  );
+  const finalFileName = sanitizeFileName(fileName, basenameFromPath(objectPath) ?? fallbackFileName);
 
   return {
-    waypointId: toPositiveInt(photo.waypoint_id ?? photo.waypointId) ?? toPositiveInt(entityId) ?? null,
+    waypointId,
     routeId,
     userCandidate,
     fileName: finalFileName,
