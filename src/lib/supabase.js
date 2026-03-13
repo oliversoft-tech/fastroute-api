@@ -27,10 +27,18 @@ function decodeJwtPayload(token) {
 }
 
 function readServiceKeyDiagnostics(serviceKey) {
-  const payload = decodeJwtPayload(serviceKey);
+  const raw = String(serviceKey || '').trim();
+  if (raw.startsWith('sb_publishable_')) {
+    return {
+      keyType: 'supabase-publishable',
+      role: 'anon'
+    };
+  }
+
+  const payload = decodeJwtPayload(raw);
   if (!payload || typeof payload !== 'object') {
     return {
-      keyType: String(serviceKey || '').startsWith('sb_secret_') ? 'supabase-secret' : 'opaque',
+      keyType: raw.startsWith('sb_secret_') ? 'supabase-secret' : 'opaque',
       role: null
     };
   }
@@ -42,9 +50,19 @@ function readServiceKeyDiagnostics(serviceKey) {
 }
 
 const serviceKeyDiagnostics = readServiceKeyDiagnostics(process.env.SUPABASE_SERVICE_ROLE_KEY);
+if (serviceKeyDiagnostics.keyType === 'supabase-publishable') {
+  throw new Error(
+    'SUPABASE_SERVICE_ROLE_KEY inválida: chave "publishable" detectada (esperado: service role/secret).'
+  );
+}
 if (serviceKeyDiagnostics.keyType === 'jwt' && serviceKeyDiagnostics.role && serviceKeyDiagnostics.role !== 'service_role') {
   throw new Error(
     `SUPABASE_SERVICE_ROLE_KEY inválida: role "${serviceKeyDiagnostics.role}" (esperado: "service_role").`
+  );
+}
+if (serviceKeyDiagnostics.keyType === 'opaque') {
+  throw new Error(
+    'SUPABASE_SERVICE_ROLE_KEY inválida: formato de chave não reconhecido (esperado JWT service_role ou sb_secret_...).'
   );
 }
 
